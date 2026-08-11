@@ -3,6 +3,10 @@
 > 文件：`agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java`（4491 行）。
 > 这是整个框架的心脏。本章按"类结构 → 入口链 → 推理 → 行动 → 收尾 → 横切能力"的顺序拆解，所有方法名均可在源码中直接定位（附行号，基于 2.0.0 主干，小幅漂移属正常）。
 
+先看一张五层结构的全景图（各层细节在本章对应小节展开）：
+
+![agent.call 宏观调用链五层全景图](images/agent-call-chain.svg)
+
 ## 3.1 类结构：为什么循环写在内部类里
 
 ```
