@@ -95,6 +95,10 @@ flowchart TB
     TK -.->|"MCP 工具注册"| MCP
 ```
 
+另附一张 `agent.call(msgs)` 宏观调用链的五层全景图（细节见第 3 章）：
+
+![agent.call 宏观调用链五层全景图](images/agent-call-chain.svg)
+
 ## 四、customer_work 项目速览
 
 customer_work 是一个把"客服业务流程图落成生产代码"的完整项目，5 个 Maven 模块 + 2 个前端：
