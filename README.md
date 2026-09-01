@@ -102,6 +102,7 @@ flowchart TB
 ## 四、customer_work 项目速览
 
 customer_work 是一个把"客服业务流程图落成生产代码"的完整项目，5 个 Maven 模块 + 2 个前端：
+![智能体客服项目](https://github.com/liulangjietou/customer_work)
 
 | 模块 | 端口 | 职责 | 与 AgentScope 的关系 |
 |---|---|---|---|
