@@ -101,7 +101,7 @@ flowchart TB
     AGENT -.-> OBS
 ```
 
-配套两个"裸 Model"辅助（第 5 章 5.5）：`TicketClassifier#classify` 智能分单（抽 JSON 得 category/skill/priority/emotion，fail-open 降级规则版）、`ConversationSummaryService` 转人工前的会话总结。
+配套两个"裸 Model"辅助（第 5 章 5.6）：`TicketClassifier#classify` 智能分单（抽 JSON 得 category/skill/priority/emotion，fail-open 降级规则版）、`ConversationSummaryService` 转人工前的会话总结。
 
 ## 9.5 其余场景一句话导航
 

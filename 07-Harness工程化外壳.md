@@ -5,16 +5,16 @@
 
 ## 7.1 组合而非继承：HarnessAgent 的结构
 
-`agent/HarnessAgent.java`（2485 行）**implements `Agent`，内部组合一个 `ReActAgent delegate`**。所有 `call/streamEvents` 重载都经 `wrappedCall`（`:792`）：
+`agent/HarnessAgent.java`（2884 行）**implements `Agent`，内部组合一个 `ReActAgent delegate`**。所有 `call/streamEvents` 重载都经 `wrappedCall`（`:900`）：
 
 ```mermaid
 flowchart TB
-    HC["HarnessAgent#call (:607)"] --> ESD["HarnessAgent#ensureSessionDefaults<br/>补默认 sessionId/userId"]
-    ESD --> WC["HarnessAgent#wrappedCall (:792)"]
+    HC["HarnessAgent#call (:677，8 个重载)"] --> ESD["HarnessAgent#ensureSessionDefaults (:972)<br/>补默认 sessionId/userId"]
+    ESD --> WC["HarnessAgent#wrappedCall (:900)"]
     WC --> ACQ["SandboxLifecycleMiddleware#acquireForCall<br/>获取沙箱租约"]
     ACQ --> DEL["ReActAgent#call<br/>进入第 3 章的完整循环<br/>（Harness 能力已作为 middleware/tool 注入其中）"]
     DEL --> REL["SandboxLifecycleMiddleware#releaseForCall<br/>释放租约"]
-    DEL -.->|"上下文溢出错误"| REC["HarnessAgent#recoverFromOverflow<br/>压缩后重试兜底"]
+    DEL -.->|"上下文溢出错误"| REC["HarnessAgent#recoverFromOverflow (:1004)<br/>压缩后重试兜底"]
 ```
 
 官方架构文档（`docs/v2/en/docs/harness/architecture.md`）的三条核心原则，读 Harness 源码前先记住：
@@ -25,20 +25,24 @@ flowchart TB
 
 ## 7.2 Builder 装配：内置 Middleware 的固定顺序
 
-`HarnessAgent.Builder#build`（约 `:2078`~`:2440`）向内部 `ReActAgent.Builder` 按固定顺序注入内置 middleware（列表顺序 = 洋葱层次，第 6 章）：
+`HarnessAgent.Builder#build`（`:2264` 起，约 600 行）向内部 `ReActAgent.Builder` 按固定顺序注入内置 middleware（列表顺序 = 洋葱层次，第 6 章）：
 
 ```
 用户 middleware（最外层）
-→ SandboxLifecycleMiddleware → AgentTraceMiddleware
-→ WorkspaceContextMiddleware → AtPathExpansionMiddleware
-→ MemoryFlushMiddleware → MemoryMaintenanceMiddleware
-→ CompactionMiddleware → ToolResultEvictionMiddleware
-→ InboxMiddleware → DynamicSubagentsMiddleware/SubagentsMiddleware
-→ AsyncToolMiddleware → PlanModeMiddleware
-→ SkillUsageMiddleware/SkillCuratorMiddleware → HarnessSkillMiddleware
+→ SandboxLifecycleMiddleware (:2428) → AgentTraceMiddleware (:2431)
+→ WorkspaceContextMiddleware (:2437) → AtPathExpansionMiddleware (:2449)
+→ TranscriptMiddleware (:2467)
+→ MemoryFlushMiddleware (:2479) → MemoryMaintenanceMiddleware (:2499)
+→ CompactionMiddleware (:2514) → ToolResultEvictionMiddleware (:2520)
+→ InboxMiddleware (:2523) → TeamsMiddleware (:2533)
+→ DynamicSubagentsMiddleware/SubagentsMiddleware (:2551/:2565)
+→ AsyncToolMiddleware (:2576) → PlanModeMiddleware (:2648)
+→ SkillUsageMiddleware (:2744)/SkillCuratorMiddleware (:2771) → HarnessSkillMiddleware (:2822)
 ```
 
-另一入口 `HarnessAgent.Builder.fromAgent(existingReActAgent)` 可把现成 ReActAgent 包成 HarnessAgent（customer_work 的渠道接入就这么用，见 7.5）。
+每一项都由对应的 builder 开关决定是否注入，所以实际链长取决于你开了哪些能力；但**相对顺序是硬编码在 `build()` 里的**，不可调。读这段代码时按行号顺着往下扫一遍，就得到了当前版本的完整洋葱层次——这比记表格可靠，因为新能力总是插进来。
+
+另一入口 `HarnessAgent.Builder.fromAgent(existingReActAgent)` 可把现成 ReActAgent 包成 HarnessAgent（customer_work 的渠道接入就这么用，见 7.6）。
 
 ## 7.3 能力子包地图
 
@@ -68,11 +72,81 @@ flowchart TB
 | `skill` | `WorkspaceSkillRepository`、`runtime/{SkillRuntime,SkillLoadTool}`、`curator/{SkillCurator,SkillPromoter,SkillSecurityScanner,SkillPromotionGate}` | 自演化闭环：使用统计 → 提案 → 安全扫描 → 审批门 → 晋升为 `workspace/skills/` 下的 Markdown |
 | `bus` | `MessageBus`、`WorkspaceMessageBus`、`AsyncToolRegistry` | 三种消费模式：排空队列（单消费者）/ 回放日志（多消费者各自游标）/ 瞬时广播；key 约定如 `agentscope:inbox:<sessionId>` |
 | `gateway` | `HarnessGateway`、`MsgContext`、`SessionTurnGate`、`SubagentRegistry`、`channel/{Channel,ChannelRouter,InboundMessage,OutboundAddress}` | 渠道消息 → `MsgContext#canonicalKey` 稳定映射 sessionId → `SessionTurnGate` 每会话公平互斥 → 路由到注册的 `HarnessAgent#call`；`lastRouteBySession` 支持主动推送 |
-| `tool`/`tools` | `FilesystemTool`、`ShellExecuteTool`、`TaskTool`、`AgentSpawnTool`、`MemorySaveTool` 等、`ToolsConfig`（`workspace/tools.json` 声明 MCP 与过滤） | Harness 的能力以内置工具形式暴露给模型 |
+| `transcript` | `TranscriptStore`、`FilesystemTranscriptStore`、`ObjectStoreTranscriptStore`、`TranscriptRef` | 会话逐事件归档，与 KV 型 `BaseStore` 正交。写入是**不可变分段**（`{tenant}/{agentId}/{sessionId}/events/{seqStart}-{seqEnd}-{writerId}.jsonl`）而非就地追加，多写者不会互相覆盖 |
+| `team` | `TeamClient`、`LocalTeamClient`、`TeamContext`、`TeamCreateSpec`、`TeamMemberSpec`、`TeamConflictException` | 多 Agent 协作的任务板 + 信箱模型；`LocalTeamClient` 走 `BaseStore` 的 CAS，另有控制面 HTTP 实现。对应 `TeamsMiddleware` 与 `TeamTool` |
+| `coordination` | `PeriodicGate`、`LocalPeriodicGate`、`StoreBackedPeriodicGate` | 周期性后台工作的**最小间隔闸门**：`tryClaim()` 返回 true 才准跑。7.3 末尾"压缩/记忆蒸馏有节流"就是靠它；`StoreBackedPeriodicGate` 让节流跨节点生效，多副本部署下不会每个副本各跑一遍蒸馏 |
+| `artifact` | `ArtifactDeliveryTarget`、`ArtifactDeliveryRequest`、`ArtifactDeliveryResult` | 产物出境的传输抽象，配合 `deliver_artifact` 工具（见 7.4） |
+| `tool`/`tools` | `FilesystemTool`、`ShellExecuteTool`、`TaskTool`、`AgentSpawnTool`、`ArtifactDeliveryTool`、`MemorySaveTool` 等、`ToolsConfig`（`workspace/tools.json` 声明 MCP 与过滤） | Harness 的能力以内置工具形式暴露给模型 |
 
 **状态三层**（官方文档口径，与第 2 章衔接）：in-call（`AgentState` + `RuntimeContext`）→ cross-call（每次 call 结束自动存/下次自动读，另有永不压缩的全量会话日志 `sessions/<sessionId>.log.jsonl`）→ long-term（`MEMORY.md` 蒸馏，每步推理注入 system prompt）。三条不变式：**system prompt 每步重建**（改 `AGENTS.md`/`MEMORY.md` 立即生效）；压缩/记忆蒸馏有节流（不是每轮都跑）；持久化统一由 core 的 `ReActAgent` + `AgentStateStore` 负责，Harness 不再自带持久化钩子。
 
-## 7.4 何时用 ReActAgent，何时用 HarnessAgent
+## 7.4 几个容易忽略但很实用的机制
+
+### `deliver_artifact`：沙箱里的产物怎么出来
+
+沙箱是个封闭盒子——Agent 在里面生成了报告、图表、压缩包，宿主拿不到。以前各家自己写"从沙箱下载再上传到某处"的胶水代码。现在这条路被收敛成一个内置工具：
+
+```
+模型调 deliver_artifact(filePath, fileName?, description?, force?)
+  → ArtifactDeliveryTool 从 AbstractFilesystem 把文件下载出来（沙箱工作区也好、远端也好）
+  → 交给 builder 上配置的 ArtifactDeliveryTarget 负责运输（对象存储、回调、消息推送……由你实现）
+  → 返回 ArtifactDeliveryResult
+```
+
+几个设计约束值得注意：
+
+- **不配 `ArtifactDeliveryTarget` 就不注册这个工具**（`Builder#artifactDeliveryTarget(...)`，`:1982`）。没有出境通道时，模型的工具列表里根本看不到它——比"工具存在但一调就报错"干净。`disableFilesystemTools` 也会一并关掉它。
+- `fileName` 必须是**纯文件名**：不许有路径分隔符、不许是 `.` 或 `..`。运输目的地的命名空间不由模型的输入决定。
+- `force` 默认 `false`，同名文件存在时不覆盖——产物交付是有外部副作用的操作，默认取保守档。
+
+### MCP 注册从"只打日志"到"有回执"
+
+MCP server 注册一直是 **best-effort**：某台 server 起不来、或者 `listTools` 超时，只记日志、不阻断启动（第 4 章 4.6 里 customer_work 也是这个 fail-open 策略）。问题是宿主服务只能去 grep 日志，没法用程序判断"我配的 8 个 MCP，现在几个是活的"。
+
+现在多了一对类型：
+
+```java
+public record McpServerRegistrationResult(
+        String serverName, String transport, Status status, Instant completedAt, Throwable cause) { }
+// Status: SUCCESS / FAILED / SKIPPED
+
+@FunctionalInterface
+public interface McpServerRegistrationListener {
+    void onCompleted(McpServerRegistrationResult result);   // 每个 server 终态回调一次
+}
+```
+
+record 的紧凑构造器做了不变式校验：`SUCCESS` 不许带 `cause`，非 `SUCCESS` 必须带 `cause`。挂上 `Builder#mcpServerRegistrationListener(...)` 就能把不健康的 MCP 配置采集进监控、下线或告警——**best-effort 的语义没变，变的是失败对调用方从此可见**。
+
+### 记忆刷写改成 fire-and-forget
+
+`MemoryFlushMiddleware` 原本用 `concatWith` 把记忆刷写接在 agent 事件流后面。后果是：默认 `FlushMode.ALWAYS` 下，**每一次对话的 `onComplete` 都要等一整轮 LLM 抽取 + 磁盘写入**才发出——用户看到最后一个字之后，还要干等好几秒流才算结束。
+
+现在改为 `doOnComplete` + `subscribeOn(boundedElastic()).subscribe()`：对话流立即完成，刷写在后台跑。配套一个必要的细节——**刷写前先 `new ArrayList<>(state.getContext())` 快照一份会话列表**，否则下一次调用清空 state 时，后台还在读的那个 list 会被并发改掉。`MemoryMaintenanceMiddleware` 是同样的结构，一并改了。
+
+代价是显式的：刷写失败不再影响本次对话（它已经完成了），所以**要靠日志和指标观测后台刷写，不能靠调用方的返回值**。
+
+### 文件搜索工具的输出封顶
+
+`grep_files` / `glob_files` 曾被归类为"自限流"的工具，实际不是——一个宽松的 pattern 打在大仓库上，几万行结果直接灌进上下文，一次就把窗口撑爆。现在两个工具都有 `limit` 参数：
+
+| 工具 | 默认 | 硬上限 |
+|---|---|---|
+| `grep_files` | 100 | 1000 |
+| `glob_files` | 200 | 1000 |
+
+超出时截断并追加一条说明，告诉模型"还有多少条没显示"——让它知道该缩小搜索范围，而不是以为自己看到了全部。只有 `list_files` 仍算自限流（正常就返回一个目录的条目）。另外 `read_file` 的区间读改成了流式，读大文件的指定行段不再把整个文件载进内存。
+
+### 沙箱绑定按调用隔离
+
+`SandboxLifecycleMiddleware` 早期把沙箱绑定放在 agent 实例级字段上。一个 `HarnessAgent` 并发服务多个会话时（第 3 章讲过这是框架的正常用法），A 会话的租约会被 B 会话覆写，出现串沙箱。现在绑定是**每次 call 独立**的，与 `CallExecution` 的 per-call 作用域对齐。这条修正的意义和第 3 章 `CallExecution` 设计成 per-call 是同一个：**凡是"属于本次调用"的东西，就不能挂在 agent 实例上**。
+
+### 子 Agent 的两处继承与描述
+
+- `SubagentFactory` 现在能带 `description`。以前自定义工厂注册的子 Agent 在 `agent_spawn` 的工具描述里没有说明文字，模型只能靠名字猜什么时候该派它。
+- 子 Agent 现在**继承父 Agent 的 memory 配置**。此前子 Agent 用默认 memory 配置，父 Agent 关掉的记忆能力在子 Agent 里又活了过来，行为不一致。
+
+## 7.5 何时用 ReActAgent，何时用 HarnessAgent
 
 | 场景 | 选择 |
 |---|---|
@@ -80,7 +154,7 @@ flowchart TB
 | 需要文件系统/工作区、长任务、上下文压缩、子 Agent、Plan Mode、沙箱执行代码 | `HarnessAgent` |
 | 已有 ReActAgent 想加渠道/工程能力 | `HarnessAgent.Builder.fromAgent(agent)` 包装 |
 
-## 7.5 customer_work 实战
+## 7.6 customer_work 实战
 
 ### 全量配置的 HarnessAgent 装配
 
