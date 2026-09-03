@@ -1,7 +1,7 @@
 # AgentScope Java 源码阅读指南
 
-> 面向版本：`io.agentscope:agentscope-*` **2.0.0**（仓库 main 分支为 2.0.0-SNAPSHOT，与 GA 主干一致）
-> 框架仓库：[agentscope-ai/agentscope-java](https://github.com/agentscope-ai/agentscope-java)（分析基于 2026-08 前后的 main 分支，行号可能随上游演进小幅漂移）
+> 面向版本：`io.agentscope:agentscope-*` **2.0.x**（分析基于 main 分支 `2.0.3-SNAPSHOT`；customer_work 实战部分基于 2.0.0 GA）
+> 框架仓库：[agentscope-ai/agentscope-java](https://github.com/agentscope-ai/agentscope-java)（行号校准至 main 分支 `d588528b`，2026-09；上游演进后可能小幅漂移，用类名/方法名定位比行号可靠）
 > 实战项目：[liulangjietou/customer_work](https://github.com/liulangjietou/customer_work)（基于 2.0.0 GA 的生产级智能客服系统）
 >
 > 本指南所有"框架路径"均相对 agentscope-java 仓库根，所有"实战路径"均相对 customer_work 仓库根。
@@ -15,7 +15,8 @@ AgentScope Java 是阿里开源的 **Agent 编程框架**，全面基于 Project
 
 - **`agentscope-core`**：框架内核。ReAct 循环、消息模型、状态持久化、工具系统、模型抽象、Middleware 扩展机制——**读懂它就读懂了框架 80% 的运行原理**。
 - **`agentscope-harness`**：工程化外壳。在 ReActAgent 之上组合出 HarnessAgent，叠加 workspace、沙箱、子 Agent、记忆压缩、Plan Mode 等"长任务工程能力"。
-- **`agentscope-extensions`**：约 50 个外部集成子模块（模型厂商、RAG、长期记忆、Redis/MySQL 存储、云沙箱、协议层、IM 渠道、Spring Boot Starter）。
+- **`agentscope-extensions`**：18 个一级模块、58 个可发布 artifact 的外部集成生态（模型厂商、RAG、长期记忆、Redis/MySQL/PostgreSQL 存储、云沙箱、协议层、IM 渠道、Spring Boot Starter）。
+- **`agentscope-service`**：2.0.3 新增的四平面管控平台（控制面 Aistio + Managed Agents + Agent Teams），基于 HarnessAgent，属于框架的消费者而非组成部分——第 8 章 8.3 单列。
 
 **核心/非核心的划分口径（按主执行链路）**：
 
@@ -40,16 +41,16 @@ AgentScope Java 是阿里开源的 **Agent 编程框架**，全面基于 Project
 
 | 章 | 文件 | 定位 | 一句话 |
 |---|---|---|---|
-| 1 | [01-模块全景与依赖拓扑.md](01-模块全景与依赖拓扑.md) | 核心 | 6 个 Maven 模块、core 的 16 个包地图、依赖方向 |
-| 2 | [02-消息与状态模型.md](02-消息与状态模型.md) | 核心 | Msg/ContentBlock/AgentState/AgentStateStore，2.0 状态体系的地基 |
-| 3 | [03-ReAct主循环.md](03-ReAct主循环.md) | **核心的核心** | ReActAgent 4491 行拆解：call → reasoning → acting → summarizing 全链路 |
+| 1 | [01-模块全景与依赖拓扑.md](01-模块全景与依赖拓扑.md) | 核心 | 7 个 Maven 模块、core 的 20 个包地图、依赖方向 |
+| 2 | [02-消息与状态模型.md](02-消息与状态模型.md) | 核心 | Msg/ContentBlock/AgentState/AgentStateStore + 乐观并发，2.0 状态体系的地基 |
+| 3 | [03-ReAct主循环.md](03-ReAct主循环.md) | **核心的核心** | ReActAgent 5353 行拆解：call → reasoning → acting → summarizing 全链路 |
 | 4 | [04-工具系统.md](04-工具系统.md) | 核心 | Toolkit 门面、@Tool 注解 → Schema 生成 → 反射执行、MCP 接入 |
-| 5 | [05-模型层.md](05-模型层.md) | 核心 | Model 抽象、Formatter 五件套、SSE 流式传输、ModelRegistry/SPI |
-| 6 | [06-Middleware与事件流.md](06-Middleware与事件流.md) | 核心 | 五切点洋葱模型、与遗留 Hook 的并存关系、33 种 AgentEvent |
+| 5 | [05-模型层.md](05-模型层.md) | 核心 | Model 抽象、Formatter 五件套、SSE 流式传输、Prompt Caching、ModelRegistry/SPI |
+| 6 | [06-Middleware与事件流.md](06-Middleware与事件流.md) | 核心 | 五切点洋葱模型、与遗留 Hook / Tracer 的并存关系、31 种 AgentEvent |
 | 7 | [07-Harness工程化外壳.md](07-Harness工程化外壳.md) | 核心 | HarnessAgent 组合模式、workspace/沙箱/子 Agent/记忆压缩/Plan Mode |
-| 8 | [08-扩展生态.md](08-扩展生态.md) | 非核心 | 约 50 个 extension 子模块速览与选型 |
+| 8 | [08-扩展生态.md](08-扩展生态.md) | 非核心 | 58 个 extension artifact 速览与选型 + agentscope-service 平台 |
 | 9 | [09-customer_work场景全景映射.md](09-customer_work场景全景映射.md) | 实战 | 17 个业务场景 → AgentScope 能力 → 源码调用链 |
-| 10 | [10-避坑清单.md](10-避坑清单.md) | 实战 | 生产项目踩过并在源码注释里记录的 10+ 个坑 |
+| 10 | [10-避坑清单.md](10-避坑清单.md) | 实战 | 生产项目踩过的 10+ 个坑 + 2.0.0 GA → 2.0.x 的行为变化清单 |
 
 ## 三、全局架构图
 
@@ -116,6 +117,7 @@ customer_work 是一个把"客服业务流程图落成生产代码"的完整项�
 
 ## 五、框架自带的对照学习材料
 
-- `agentscope-examples/documentation/src/main/java/io/agentscope/examples/documentation2/`：13 个子包（context/harness/hitl/mcp/middleware/model/multimodal/quickstart/skill/state/streaming/structuredoutput/tool）与官方文档章节一一对应。
+- `agentscope-examples/documentation/src/main/java/io/agentscope/examples/documentation2/`：14 个子包（context / harness / hitl / mcp / middleware / model / multimodal / quickstart / **rag** / skill / state / streaming / structuredoutput / tool）与官方文档章节一一对应。
+- `agentscope-examples/` 下另有 3 个完整应用（`agents/agentscope-{codingagent,dataagent,paw}`）与两个前端集成示例（`agui`、`agentscope-copilotkit`）。原先的 `agentscope-builder` 已升级为 `agentscope-service` 的 Managed Agents（第 8 章 8.3）。
 - `docs/v2/zh/docs/`：中文官方文档，其中 `harness/architecture.md` 与 `building-blocks/middleware.md` 最值得逐字读。
 - 根目录 `SKILL.md`：给 AI 编码助手的项目规约，`PROHIBITED PRACTICES` 与 `COMMON PITFALLS` 两节记录了框架的隐含约定（尤其 Reactor 使用禁忌）。
