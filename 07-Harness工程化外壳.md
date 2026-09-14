@@ -5,39 +5,39 @@
 
 ## 7.1 组合而非继承：HarnessAgent 的结构
 
-`agent/HarnessAgent.java`（2884 行）**implements `Agent`，内部组合一个 `ReActAgent delegate`**。所有 `call/streamEvents` 重载都经 `wrappedCall`（`:900`）：
+`agent/HarnessAgent.java`（2922 行）**implements `Agent`，内部组合一个 `ReActAgent delegate`**。所有 `call/streamEvents` 重载都经 `wrappedCall`（`:938`）：
 
 ```mermaid
 flowchart TB
-    HC["HarnessAgent#call (:677，8 个重载)"] --> ESD["HarnessAgent#ensureSessionDefaults (:972)<br/>补默认 sessionId/userId"]
-    ESD --> WC["HarnessAgent#wrappedCall (:900)"]
+    HC["HarnessAgent#call (:715，8 个重载)"] --> ESD["HarnessAgent#ensureSessionDefaults (:1010)<br/>补默认 sessionId/userId"]
+    ESD --> WC["HarnessAgent#wrappedCall (:938)"]
     WC --> ACQ["SandboxLifecycleMiddleware#acquireForCall<br/>获取沙箱租约"]
     ACQ --> DEL["ReActAgent#call<br/>进入第 3 章的完整循环<br/>（Harness 能力已作为 middleware/tool 注入其中）"]
     DEL --> REL["SandboxLifecycleMiddleware#releaseForCall<br/>释放租约"]
-    DEL -.->|"上下文溢出错误"| REC["HarnessAgent#recoverFromOverflow (:1004)<br/>压缩后重试兜底"]
+    DEL -.->|"上下文溢出错误"| REC["HarnessAgent#recoverFromOverflow (:1042)<br/>压缩后重试兜底"]
 ```
 
 官方架构文档（`docs/v2/en/docs/harness/architecture.md`）的三条核心原则，读 Harness 源码前先记住：
 
 1. **能力叠加在推理循环之上，而非嵌入其中**——workspace 注入、压缩、子 Agent、沙箱、Plan Mode 各自挂在循环的关键时刻（以 Middleware/Tool 形式），核心算法零改动；
 2. **能力之间互不依赖，只共享三个对象**——`RuntimeContext`（本次调用是谁）、workspace（读写哪些文件）、`AgentStateStore`（如何恢复）；
-3. **内置 middleware 顺序固定，用户 middleware 永远排在最前面（最外层）。**
+3. **内置 middleware 顺序固定，用户 middleware 永远排在最前面（最外层）。** 这条在源码层面有个前提：用户 middleware 经 `Builder#middleware(...)` 在调用时就直接注册进内层 `ReActAgent.Builder`（`:1588`），早于 `build()` 注入的全部内置层，所以同为默认 `order()=1` 时才排在最外。一旦你的 middleware 覆写了 `order()` 并返回 0 或负数，它会被排序到所有内置层**里面**（排序规则见第 6 章 6.1）。
 
 ## 7.2 Builder 装配：内置 Middleware 的固定顺序
 
-`HarnessAgent.Builder#build`（`:2264` 起，约 600 行）向内部 `ReActAgent.Builder` 按固定顺序注入内置 middleware（列表顺序 = 洋葱层次，第 6 章）：
+`HarnessAgent.Builder#build`（`:2302` 起，约 600 行）向内部 `ReActAgent.Builder` 按固定顺序注入内置 middleware（列表顺序 = 洋葱层次，第 6 章）：
 
 ```
 用户 middleware（最外层）
-→ SandboxLifecycleMiddleware (:2428) → AgentTraceMiddleware (:2431)
-→ WorkspaceContextMiddleware (:2437) → AtPathExpansionMiddleware (:2449)
-→ TranscriptMiddleware (:2467)
-→ MemoryFlushMiddleware (:2479) → MemoryMaintenanceMiddleware (:2499)
-→ CompactionMiddleware (:2514) → ToolResultEvictionMiddleware (:2520)
-→ InboxMiddleware (:2523) → TeamsMiddleware (:2533)
-→ DynamicSubagentsMiddleware/SubagentsMiddleware (:2551/:2565)
-→ AsyncToolMiddleware (:2576) → PlanModeMiddleware (:2648)
-→ SkillUsageMiddleware (:2744)/SkillCuratorMiddleware (:2771) → HarnessSkillMiddleware (:2822)
+→ SandboxLifecycleMiddleware (:2466) → AgentTraceMiddleware (:2469)
+→ WorkspaceContextMiddleware (:2475) → AtPathExpansionMiddleware (:2487)
+→ TranscriptMiddleware (:2505)
+→ MemoryFlushMiddleware (:2517) → MemoryMaintenanceMiddleware (:2537)
+→ CompactionMiddleware (:2552) → ToolResultEvictionMiddleware (:2558)
+→ InboxMiddleware (:2561) → TeamsMiddleware (:2571)
+→ DynamicSubagentsMiddleware/SubagentsMiddleware (:2589/:2603)
+→ AsyncToolMiddleware (:2614) → PlanModeMiddleware (:2686)
+→ SkillUsageMiddleware (:2782)/SkillCuratorMiddleware (:2809) → HarnessSkillMiddleware (:2860)
 ```
 
 每一项都由对应的 builder 开关决定是否注入，所以实际链长取决于你开了哪些能力；但**相对顺序是硬编码在 `build()` 里的**，不可调。读这段代码时按行号顺着往下扫一遍，就得到了当前版本的完整洋葱层次——这比记表格可靠，因为新能力总是插进来。
@@ -95,7 +95,7 @@ flowchart TB
 
 几个设计约束值得注意：
 
-- **不配 `ArtifactDeliveryTarget` 就不注册这个工具**（`Builder#artifactDeliveryTarget(...)`，`:1982`）。没有出境通道时，模型的工具列表里根本看不到它——比"工具存在但一调就报错"干净。`disableFilesystemTools` 也会一并关掉它。
+- **不配 `ArtifactDeliveryTarget` 就不注册这个工具**（`Builder#artifactDeliveryTarget(...)`，`:2020`）。没有出境通道时，模型的工具列表里根本看不到它——比"工具存在但一调就报错"干净。`disableFilesystemTools` 也会一并关掉它。
 - `fileName` 必须是**纯文件名**：不许有路径分隔符、不许是 `.` 或 `..`。运输目的地的命名空间不由模型的输入决定。
 - `force` 默认 `false`，同名文件存在时不覆盖——产物交付是有外部副作用的操作，默认取保守档。
 
@@ -143,8 +143,50 @@ record 的紧凑构造器做了不变式校验：`SUCCESS` 不许带 `cause`，�
 
 ### 子 Agent 的两处继承与描述
 
-- `SubagentFactory` 现在能带 `description`。以前自定义工厂注册的子 Agent 在 `agent_spawn` 的工具描述里没有说明文字，模型只能靠名字猜什么时候该派它。
+- `Builder#subagentFactory(name, description, factory)`（`:1917`）多了带 `description` 的重载，内部存为 `HarnessAgentBuilderSupport.SubagentFactoryEntry(name, description, factory)`。以前自定义工厂注册的子 Agent 在 `agent_spawn` 的工具描述里只有名字，模型只能靠名字猜什么时候该派它；`description` 为空时仍回退为名字。
 - 子 Agent 现在**继承父 Agent 的 memory 配置**。此前子 Agent 用默认 memory 配置，父 Agent 关掉的记忆能力在子 Agent 里又活了过来，行为不一致。
+- **父 Agent 的 DENY 规则强制下发**（2.0.1）。`AgentSpawnTool#collectParentDenyRules`（`AgentSpawnTool.java:1258`）把父 `PermissionContextState` 里的 deny 规则摊平后带给子 Agent，本地子 Agent 与远程子 Agent（经 `RemoteSubmitContext`）走同一份。只下发 DENY、不下发 ALLOW 是刻意的：**子 Agent 的权限只能比父更紧，不能借派生绕过父级的禁令**。声明式子 Agent 可以在 `SubagentDeclaration` 上关掉 `inheritParentPermissions`，默认开启。
+
+**发版说明与 tag 不一致的一条**：v2.0.3 的 GitHub Release 列了「子 Agent 继承 pending 工具恢复开关」（#3017），但对应提交 `787aa01d` 只在 main 分支上，**v2.0.3 tag 并不包含**——tag 源码里 `enablePendingToolRecovery` 只在 `HarnessAgent.Builder`（`:1654`）和 `fromAgent` 复制时出现，不会传给子 Agent。用 2.0.3 的话，子 Agent 需要在其自身构建处显式开启。
+
+### 同一实例上的会话级操作补齐
+
+`HarnessAgent` 是组合而非继承（7.1），所以 `ReActAgent` 上新增的会话级 API 不会自动出现在它身上，得逐个转发。截至 v2.0.3 已补齐：
+
+| API | 位置 | 说明 |
+|---|---|---|
+| `interrupt(ctx)` / `interrupt(ctx, msg)` / `interrupt(userId, sessionId)` / `interrupt(userId, sessionId, msg)` | `:598`~`:627` | 2.0.3 才补上（#2600）。此前 `HarnessAgent` 只有无参和 `(Msg)` 两个重载，**只能打断默认会话**——用它并发服务多会话时，业务侧根本没法中断指定用户的那一次调用 |
+| `clearContext(ctx)` / `clearContext(userId, sessionId)` | `:352` / `:365` | 清空模型可见的会话上下文，身份与权限/工具/任务状态保留（语义详见第 2 章 2.4） |
+| `clearStateCache()` 及两个按会话的重载 | `:373`~`:394` | 只释放本地缓存，不动 store |
+
+### 后台节流的 key 不能撞
+
+`MemoryFlushMiddleware` 与 `MemoryMaintenanceMiddleware` 都靠 `PeriodicGate`（7.3 的 `coordination` 子包）做最小间隔节流，两者配置的间隔也不同。但早期它们算出的闸门 key 都是 `isolationScope + ":" + timerKey`——**同一个 key**。结果是先跑的那个占住时间窗，另一个在窗口内一直 `tryClaim()` 失败：配置了"每 10 分钟刷写、每 6 小时维护"，实际可能维护永远跑不起来。
+
+v2.0.3 给 key 加了操作前缀（#2993）：
+
+```java
+return "memory-flush:"       + isolationScope.name() + ":" + timerKeyFor(rc);   // MemoryFlushMiddleware.java:311
+return "memory-maintenance:" + isolationScope.name() + ":" + timerKeyFor(rc);   // MemoryMaintenanceMiddleware.java:181
+```
+
+原来的 scope 前缀是为了隔离维度（`userId` 恰好等于某个 `sessionId` 时不串）；这次补的是**操作**维度。自己用 `PeriodicGate` 做节流时，key 要同时带上"谁"和"做什么"。
+
+### 文件系统层三处"不再把错误吞成空结果"
+
+这几条是同一类问题——**错误被伪装成合法的空结果**，模型据此做出错误决策，而且日志里什么都看不到：
+
+- **`LocalFilesystemWithShell#execute` 管道死锁**（#2839）。旧实现先 `proc.waitFor(timeout)`，结束后才 `readAllBytes()` 读 stdout/stderr。子进程输出一旦超过 OS 管道缓冲区（Linux 默认 64KiB，macOS 更小），就阻塞在写管道上等人读，而父进程在等它退出——互相等到超时，**被误报成"命令超时"**。现在改为起两个 daemon 线程（`drainAsync`，`LocalFilesystemWithShell.java:464`）在 `waitFor`（`:358`）期间并发读空两个流。这是 `ProcessBuilder` 的经典坑，自己写进程调用时同样适用。
+- **沙箱文件系统读操作**（#2967）。`ls` / `read` / `grep` / `glob` 此前不检查 `execute()` 是否成功：命令本身没跑起来（沙箱失联、超时）时，`ls` 返回空列表、`read` 返回 `file_not_found`，模型会以为"目录是空的""文件不存在"然后去新建。现在 `BaseSandboxFilesystem` 统一先判 `isSuccess()`，失败就带上 `executeFailureMessage`（`:458`）返回错误；只有"命令确实跑了、退出码 >0 且不是超时的 124"才仍判为文件不存在。
+- **`ls()`**（#2413）同理，`LocalFilesystem`、`BaseSandboxFilesystem` 与 `FilesystemTool` 三处一起改为出错即报错，而不是静默返回空列表。
+
+### 压缩的 token 估算把 thinking 算进去了
+
+`TokenCounterUtil`（`memory/compaction/TokenCounterUtil.java:132`）估算上下文 token 数时，`ThinkingBlock` 以前按一个固定的兜底开销计。推理模型一轮的 thinking 可能有几千 token，被严重低估的后果是**压缩触发得太晚**，真正发请求时才撞上模型的上下文上限。现在按 thinking 文本实际长度估算，嵌套在 `ToolResultBlock` 里的 thinking 也一并计入（#3009）。
+
+### 其它 2.0.1 起的小项
+
+- 默认工作区可由环境变量 `AGENTSCOPE_WORKSPACE`（`:1143`）指定，便于镜像打包时把工作区挂到固定卷上。
 
 ## 7.5 何时用 ReActAgent，何时用 HarnessAgent
 
