@@ -80,6 +80,54 @@ flowchart TB
 
 **状态三层**（官方文档口径，与第 2 章衔接）：in-call（`AgentState` + `RuntimeContext`）→ cross-call（每次 call 结束自动存/下次自动读，另有永不压缩的全量会话日志 `sessions/<sessionId>.log.jsonl`）→ long-term（`MEMORY.md` 蒸馏，每步推理注入 system prompt）。三条不变式：**system prompt 每步重建**（改 `AGENTS.md`/`MEMORY.md` 立即生效）；压缩/记忆蒸馏有节流（不是每轮都跑）；持久化统一由 core 的 `ReActAgent` + `AgentStateStore` 负责，Harness 不再自带持久化钩子。
 
+### 两条核心链路：agent_spawn 与上下文压缩
+
+**`agent_spawn`**（`tool/AgentSpawnTool.java`）是子 Agent 能力的入口。模型的一次调用会按"有没有任务、超时设多少、是不是远程"分流到四条执行路径：
+
+```mermaid
+flowchart TB
+    SP["AgentSpawnTool#agentSpawn (:301)"] --> DEP{"嵌套深度 > MAX_SPAWN_DEPTH（3）？"}
+    DEP -->|"是"| E1["Error: Maximum spawn depth exceeded"]
+    DEP -->|"否"| CR["DefaultAgentManager#createAgentIfPresent (:107)<br/>按 agent_id 取声明式 / 自定义工厂子 Agent"]
+    CR --> PREP["persistSpawnEntry (:1053) 登记会话<br/>propagatePlanMode (:739) 父在 Plan Mode 则子只读<br/>propagateParentDenyRules (:1713) 下发 DENY"]
+    PREP --> TASK{"带 task？"}
+    TASK -->|"否"| ACC["status: accepted<br/>只建会话，等后续 agent_send"]
+    TASK -->|"是"| TO{"resolveEffectiveTimeoutMs (:1531)"}
+    TO -->|"0：纯后台"| BG["TaskRepository#putTask<br/>本地：LocalTaskRunSpec 内 invokeAgent(...).block()<br/>远程：RemoteTaskRunSpec<br/>立即返回 task_id"]
+    TO -->|"> 0 且远程"| RS["runRemoteSyncReactive (:1292)<br/>经 agent-protocol 调远端（第 8 章）"]
+    TO -->|"> 0 且本地"| TP["execWithTimeoutPromotion (:881)<br/>execLocalSync 与超时赛跑"]
+    TP --> LS["execLocalSync (:768)<br/>注入 FORWARDING_CONTEXT_KEY<br/>子 Agent 事件转发进父流（第 6 章 6.3）"]
+    TP -->|"超时 + forceSync"| INT["interruptAgent (:985)<br/>返回 status: timeout"]
+    TP -->|"超时，未强制同步"| PRO["转为后台任务继续跑，不丢弃已进行的工作"]
+    ACC --> EXP["withSubagentExposedEvent (:1575)<br/>按需发 SubagentExposedEvent"]
+    BG --> EXP
+    RS --> EXP
+    LS --> EXP
+```
+
+两点值得注意。**纯后台路径看不到子 Agent 的流式事件**：`LocalTaskRunSpec` 在后台线程里 `block()` 等结果，没有父级 Context，自然也没有转发 emitter——这是有意为之，后台任务的结果经 `SubagentsMiddleware` 以 system-reminder 形式在下一轮推回主 Agent。**同步路径超时默认不中断**：`execWithTimeoutPromotion` 让子 Agent 转去后台继续跑，只有开启 force-sync 时才会调用 `interruptAgent` 真正打断。
+
+**上下文压缩**挂在 `onReasoning` 上，每轮推理前检查一次：
+
+```mermaid
+flowchart TB
+    CM["CompactionMiddleware#onReasoning (:76)<br/>非 ReActAgent 直接放行"] --> SPLIT["拆出首条 SYSTEM 消息，其余为 conversation"]
+    SPLIT --> CI["ConversationCompactor#compactIfNeeded (ConversationCompactor.java:92)"]
+    CI --> PRE["truncateArgs (:612) 截断超长工具参数<br/>→ pruneToolResults (:510) 修剪旧工具结果"]
+    PRE --> TOK["TokenCounterUtil#calculateToken (:73)<br/>ThinkingBlock 按实际长度计（见 7.4）"]
+    TOK --> SC{"shouldCompact (:217)？"}
+    SC -->|"否"| PASS["next.apply(原输入)"]
+    SC -->|"是"| CUT["determineCutoffIndex (:245)<br/>→ findSafeCutoffPoint (:296) 切点落在 TOOL 消息上时<br/>回退到发起该调用的 ASSISTANT 消息之前，不拆开调用与结果"]
+    CUT --> FL["flushBeforeCompact：MemoryFlushManager#flushMemories (:115)<br/>先把要被压掉的前缀蒸馏进记忆"]
+    FL --> OFF["offloadBeforeCompact：全量消息落盘，拿到文件路径"]
+    OFF --> SUMM["summarizePrefix (:344) 调模型总结前缀<br/>→ buildSummaryMessage (:454) 附带落盘路径"]
+    SUMM --> APPLY["CompactionMiddleware#applyToContext (:220)<br/>摘要 + 保留尾部 写回 AgentState"]
+    APPLY --> NEXT["next.apply(SYSTEM + 压缩后消息)"]
+    CI -.->|"异常：中断原样抛出，其余只打日志"| PASS
+```
+
+压缩的顺序是**先蒸馏、再落盘、最后总结**：被压掉的那段对话先由 `flushMemories` 提取进长期记忆，再把全量消息写到文件，摘要里带上文件路径，模型需要细节时还能读回原文。压缩失败时降级为不压缩、继续推理，但**中断异常例外**——它会原样抛出。这正是 v2.0.3 的修正（#2659），此前用户中断会被吞掉，记成一次"压缩失败"。
+
 ## 7.4 几个容易忽略但很实用的机制
 
 ### `deliver_artifact`：沙箱里的产物怎么出来
@@ -124,6 +172,28 @@ record 的紧凑构造器做了不变式校验：`SUCCESS` 不许带 `cause`，�
 
 现在改为 `doOnComplete` + `subscribeOn(boundedElastic()).subscribe()`：对话流立即完成，刷写在后台跑。配套一个必要的细节——**刷写前先 `new ArrayList<>(state.getContext())` 快照一份会话列表**，否则下一次调用清空 state 时，后台还在读的那个 list 会被并发改掉。`MemoryMaintenanceMiddleware` 是同样的结构，一并改了。
 
+2.0.3 的实际实现比"起一个后台订阅"多了一层**按节流 key 排队**，避免同一用户或会话的刷写并发执行、互相踩踏：
+
+```mermaid
+flowchart TB
+    OA["MemoryFlushMiddleware#onAgent (:153)<br/>next.apply(input).doOnComplete(...)"] -->|"流正常完成才触发<br/>出错或取消都不刷"| SCH["scheduleFlush (:162)<br/>key = compositeTimerKey (:310)<br/>= memory-flush:SCOPE:timerKey"]
+    SCH --> Q{"FLUSH_QUEUES[key] 正在运行？"}
+    Q -->|"否"| RUN["runFlush (:203)<br/>Mono.defer(doFlush).subscribeOn(boundedElastic).subscribe()"]
+    Q -->|"是"| PEND["pending.put(会话键, 任务)<br/>同一会话只保留最新一个，旧的被替换"]
+    RUN --> DF["doFlush (:251)<br/>new ArrayList(state.getContext()) 快照"]
+    DF --> SH{"shouldFlushNow (:291)"}
+    SH -->|"ALWAYS"| FM["MemoryFlushManager#flushMemories (MemoryFlushManager.java:115)<br/>模型抽取 → 写 memory/YYYY-MM-DD.md"]
+    SH -->|"THROTTLED"| PG["PeriodicGate#tryClaim(key, minGap)"]
+    PG -->|"抢到时间窗"| FM
+    PG -->|"窗口内"| SKIP["跳过"]
+    SH -->|"NEVER"| SKIP
+    FM --> FIN["doFinally → drainFlushQueue (:214)<br/>取出下一个 pending 任务继续跑，队列空则移除 key"]
+    SKIP --> FIN
+    PEND -.-> FIN
+```
+
+这里有个取舍：排队的任务在**真正执行时**才读取会话状态，而不是在加入队列时读。所以一次刷写进行期间，同一会话又完成了几轮对话，只会再补一次刷写，读到的是最新的上下文，不会每一轮各刷一遍。
+
 代价是显式的：刷写失败不再影响本次对话（它已经完成了），所以**要靠日志和指标观测后台刷写，不能靠调用方的返回值**。
 
 ### 文件搜索工具的输出封顶
@@ -148,6 +218,8 @@ record 的紧凑构造器做了不变式校验：`SUCCESS` 不许带 `cause`，�
 - **父 Agent 的 DENY 规则强制下发**（2.0.1）。`AgentSpawnTool#collectParentDenyRules`（`AgentSpawnTool.java:1258`）把父 `PermissionContextState` 里的 deny 规则摊平后带给子 Agent，本地子 Agent 与远程子 Agent（经 `RemoteSubmitContext`）走同一份。只下发 DENY、不下发 ALLOW 是刻意的：**子 Agent 的权限只能比父更紧，不能借派生绕过父级的禁令**。声明式子 Agent 可以在 `SubagentDeclaration` 上关掉 `inheritParentPermissions`，默认开启。
 
 **发版说明与 tag 不一致的一条**：v2.0.3 的 GitHub Release 列了「子 Agent 继承 pending 工具恢复开关」（#3017），但对应提交 `787aa01d` 只在 main 分支上，**v2.0.3 tag 并不包含**——tag 源码里 `enablePendingToolRecovery` 只在 `HarnessAgent.Builder`（`:1654`）和 `fromAgent` 复制时出现，不会传给子 Agent。用 2.0.3 的话，子 Agent 需要在其自身构建处显式开启。
+
+> **main 已变更（未发版）**：#3017 已在 main 合入（`787aa01d`）。父 `HarnessAgent` 的 `enablePendingToolRecovery` 会下发给声明式子 Agent 和内置的 general-purpose 子 Agent；声明式子 Agent 还可以在 Markdown frontmatter 里用 `enable_pending_tool_recovery`（或驼峰写法）单独覆盖——子 Agent 自己声明了就用自己的，没声明才继承父级。
 
 ### 同一实例上的会话级操作补齐
 
@@ -187,6 +259,8 @@ return "memory-maintenance:" + isolationScope.name() + ":" + timerKeyFor(rc);   
 ### 其它 2.0.1 起的小项
 
 - 默认工作区可由环境变量 `AGENTSCOPE_WORKSPACE`（`:1143`）指定，便于镜像打包时把工作区挂到固定卷上。
+
+> **main 已变更（未发版）**：内置的 `web_fetch` 与 `web_search`（后者依赖 Tavily，需要 `TAVILY_API_KEY`）在 2.0.3 的 `Builder#build` 里是**无条件注册**的（`HarnessAgent.java:2670`），不受任何开关控制——内网部署时模型照样能在工具列表里看到它们，调用时才失败。main 新增 `Builder#disableWebTools()`（#3075），以及 `Builder#webHttpClient(HttpClient)`，用于注入自定义的 `HttpClient`，比如配代理或出网白名单（#3103）。
 
 ## 7.5 何时用 ReActAgent，何时用 HarnessAgent
 

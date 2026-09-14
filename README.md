@@ -5,7 +5,8 @@
 > 实战项目：[liulangjietou/customer_work](https://github.com/liulangjietou/customer_work)（基于 2.0.0 GA 的生产级智能客服系统）
 >
 > 本指南所有"框架路径"均相对 agentscope-java 仓库根，所有"实战路径"均相对 customer_work 仓库根。
-> 所有流程图/架构图/模块图节点使用正文中出现过的 `类名#方法名`，图文一一对应。
+> 正文中形如 **「main 已变更（未发版）」** 的引用块，标注的是上游 main 分支在 v2.0.3 之后已合入、但尚未发版的变更（核对至 main `7d321e2b`）；正文本身与行号仍以 v2.0.3 为准。
+> 所有流程图/架构图/模块图节点使用正文中出现过的 `类名#方法名`，图文一一对应；方法级调用链图的节点附行号 `(:N)`，框架侧对应 v2.0.3 源码，第 9 章 customer_work 侧对应其 `85fde31` 提交。
 
 ---
 
@@ -43,13 +44,13 @@ AgentScope Java 是阿里开源的 **Agent 编程框架**，全面基于 Project
 |---|---|---|---|
 | 1 | [01-模块全景与依赖拓扑.md](01-模块全景与依赖拓扑.md) | 核心 | 7 个 Maven 模块、core 的 20 个包地图、依赖方向 |
 | 2 | [02-消息与状态模型.md](02-消息与状态模型.md) | 核心 | Msg/ContentBlock/AgentState/AgentStateStore + 乐观并发，2.0 状态体系的地基 |
-| 3 | [03-ReAct主循环.md](03-ReAct主循环.md) | **核心的核心** | ReActAgent 5355 行拆解：call → reasoning → acting → summarizing 全链路 |
+| 3 | [03-ReAct主循环.md](03-ReAct主循环.md) | **核心的核心** | ReActAgent 5355 行拆解：call → reasoning → acting → summarizing 全链路，含入口分流与异常/中断出口链路图 |
 | 4 | [04-工具系统.md](04-工具系统.md) | 核心 | Toolkit 门面、@Tool 注解 → Schema 生成 → 反射执行、默认并行与并发分区、MCP 接入 |
 | 5 | [05-模型层.md](05-模型层.md) | 核心 | Model 抽象、Formatter 五件套、SSE 流式传输与背压、Prompt Caching、9 个 providerId 的 SPI |
 | 6 | [06-Middleware与事件流.md](06-Middleware与事件流.md) | 核心 | 五切点洋葱模型与 `order()` 排序、改写事件流与改写历史的区别、遗留 Hook / Tracer、31 种 AgentEvent |
 | 7 | [07-Harness工程化外壳.md](07-Harness工程化外壳.md) | 核心 | HarnessAgent 组合模式、workspace/沙箱/子 Agent/记忆压缩/Plan Mode、2.0.1~2.0.3 的机制补齐 |
 | 8 | [08-扩展生态.md](08-扩展生态.md) | 非核心 | 59 个 extension artifact 速览与选型 + agentscope-service 平台 |
-| 9 | [09-customer_work场景全景映射.md](09-customer_work场景全景映射.md) | 实战 | 17 个业务场景 → AgentScope 能力 → 源码调用链 |
+| 9 | [09-customer_work场景全景映射.md](09-customer_work场景全景映射.md) | 实战 | 17 个业务场景 → AgentScope 能力 → 源码调用链，主干场景附方法级链路图 |
 | 10 | [10-避坑清单.md](10-避坑清单.md) | 实战 | 生产项目踩过的 10+ 个坑、2.0.0 GA → 2.0.3 行为变化、发版说明与 tag 源码不一致的三处 |
 
 ## 三、全局架构图

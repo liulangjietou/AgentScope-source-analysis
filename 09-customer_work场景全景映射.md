@@ -2,6 +2,7 @@
 
 > 本章从**业务场景**视角出发：每个场景 = 用了什么 AgentScope 能力 + 入口在哪 + 调用链长什么样 + 对应本指南哪一章。
 > 实战路径相对 customer_work 仓库根；`starter/...` 代表 `customer-work-starter/src/main/java/com/richard/fyoung/customerwork/...`，`admin/...` 代表 `customer-admin-server/src/main/java/com/richard/fyoung/customeradmin/...`。
+> 本章的方法级链路图（带行号的 mermaid 图）依据 customer_work main 分支 `85fde31`（2026-09-10，已升级至 agentscope 2.0.3）逐一核对；图中 customer_work 侧行号基于该提交，框架侧行号基于 v2.0.3。正文文字写于更早的版本，个别包路径与现状不同，以图中类名为准。
 
 ## 9.0 项目模块与请求流向
 
@@ -49,6 +50,44 @@ flowchart LR
 
 场景 1/2/3/5/6/9 的调用链已在对应章节的实战小节展开，下面细讲四个跨章节的综合场景。
 
+### 场景 1~3：一次客服请求的三条入口
+
+同步对话、流式回复、意图识别共用 `CustomerServiceService` 与 `CustomerServiceAgentFactory`，但各自对 Agent 的持有方式不同：
+
+```mermaid
+flowchart TB
+    subgraph S1["场景 1：同步对话"]
+        C1["CustomerServiceController#chat (:63)"] --> SV1["CustomerServiceService#chat (:331)"]
+        SV1 --> Q1{"TenantQuotaGuard#check (:50)"}
+        Q1 -->|"超额拒绝"| QR["QUOTA_EXCEEDED_REPLY"]
+        Q1 -->|"放行 / 降级"| SC1{"启用语义缓存？<br/>SemanticCacheService#lookup (:107)"}
+        SC1 -->|"命中"| HIT["applyOutboundGuard (:270) 出站过滤后直接返回"]
+        SC1 -->|"未命中 / 未启用"| IA["invokeAgent (:363)"]
+        IA --> RA["resolveAgent (:807)<br/>sessionAgents.computeIfAbsent → CustomerServiceAgentFactory#createAgent (:208)"]
+        RA --> LOCK["withSessionLock (:845) 应用侧会话串行"]
+        LOCK --> CALL["ReActAgent#call(spotlightAttachments(text), ctx)<br/>ctx = CustomerServiceAgentFactory#contextFor (:146)"]
+        Q1 -.->|"降级"| DEG["contextWrite(ModelRoutingContext#preferFallback (:25))<br/>路由到备用模型"]
+    end
+    subgraph S2["场景 2：流式回复"]
+        C2["CustomerServiceController#chatStream (:74)"] --> SV2["CustomerServiceService#chatStream (:414)"]
+        SV2 --> SC2{"语义缓存"}
+        SC2 -->|"命中"| SCA["streamCachedAnswer (:468) 切块模拟流式"]
+        SC2 -->|"未命中"| SFC["streamFromAgentAndCache (:487)"]
+        SFC --> SFA["streamFromAgent (:506)<br/>withSessionLockFlux (:856)"]
+        SFA --> SE["ReActAgent#streamEvents → publishOn(boundedElastic)<br/>取 TextBlockDeltaEvent；无 delta 时用 AgentResultEvent 补全文"]
+        SE --> GUARD["newOutboundGuard (:257) → SensitiveWordStreamGuard<br/>流末 flush (:113) 吐出攒住的尾部"]
+    end
+    subgraph S3["场景 3：结构化意图识别"]
+        C3["CustomerServiceController#classifyIntent (:96)"] --> SV3["CustomerServiceService#classifyIntent (:594)"]
+        SV3 --> USING["Mono.using：CustomerServiceAgentFactory#createAgent(intent:{sessionId})<br/>一次性 Agent，用完 AgentResourceCloser#closeQuietly (:25)"]
+        USING --> SO["ReActAgent#call(prompt, IntentResult.class, ctx)<br/>（第 3 章 3.7 结构化输出）"]
+        SO -->|"无结构化数据 / 异常"| FB["fallbackIntent：intent = other，转人工兜底"]
+        SV3 -.-> SUB["整体 subscribeOn(boundedElastic)"]
+    end
+```
+
+三条入口对 Agent 实例的管理方式各不一样，这是读这段代码的关键：同步和流式复用 `sessionAgents` 里的会话级热实例（`resolveAgent` 用 `computeIfAbsent`）；意图识别每次用 `Mono.using` 新建一个 `"intent:"` 前缀的临时 Agent，用完立即关闭，不污染真实会话，也不占热缓存。
+
 ## 9.2 场景 4：RAG 的两条互补路径
 
 ```mermaid
@@ -74,13 +113,25 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    IN["CustomerServiceController#consult"] --> ORCH["MultiAgentOrchestrator#consult"]
-    ORCH --> FAST{"规则快车道<br/>FAST_ROUTE_KEYWORDS 命中唯一意图？<br/>（退款/物流/投诉/发票…）"}
-    FAST -->|"命中"| ROUTE["直接路由到对应专家"]
-    FAST -->|"未命中"| LLM_TRIAGE["LLM 分诊<br/>ReActAgent#call(text, IntentResult.class, ctx)<br/>（第 3 章结构化输出）"]
-    LLM_TRIAGE --> FANOUT["fanout 三专家 ReActAgent 并行会诊<br/>OrderExpert / AfterSalesExpert / KnowledgeExpert<br/>各自 subscribeOn(boundedElastic) + maxConcurrency 限流<br/>+ 单专家 timeout 隔离"]
-    ROUTE --> FANOUT
-    FANOUT --> REDUCE["reduce 归纳统一口径回复"]
+    IN["CustomerServiceController#consult (:123)"] --> ORCH["MultiAgentOrchestrator#consult (:257)"]
+    ORCH --> EN{"multi-agent.enabled ？"}
+    EN -->|"否"| DIS["DISABLED_REPLY"]
+    EN -->|"是"| BS["buildSpecialists (:181)<br/>按配置 experts 逐个构建专家 ReActAgent<br/>（按 order 排序，按 toolGroups 装配工具）"]
+    BS --> MODE{"mode = sequential ？"}
+    MODE -->|"是"| SEQ["sequential (:433) 专家依次调用"]
+    MODE -->|"否"| SEL["selectExperts (:293)"]
+    SEL --> RT{"routing-enabled ？"}
+    RT -->|"否"| ALL["全部专家"]
+    RT -->|"是"| FAST{"fast-route-enabled 且<br/>fastRouteIntent (:361) 恰好命中一类意图？<br/>（关键词来自配置 routeKeywords，多类命中视为模糊）"}
+    FAST -->|"命中"| PICK["expertsForIntent (:335) 按意图挑专家"]
+    FAST -->|"未命中"| ROUTER["routerAgent (:454) 一次性路由 Agent<br/>ReActAgent#call(text, IntentResult.class, ctx)"]
+    ROUTER -->|"成功"| PICK
+    ROUTER -->|"失败"| ALL
+    PICK --> FAN["fanout (:384)<br/>flatMap(task.subscribeOn(boundedElastic), maxConcurrency)<br/>每个专家 callExpert (:417)，单专家超时隔离"]
+    ALL --> FAN
+    FAN --> RED["reduce (:396)<br/>reduceEnabled 且多于一个专家 → reducerAgent (:474) 归纳统一口径<br/>否则 aggregate (:442) 直接拼接；归纳失败退回拼接"]
+    SEQ --> CLOSE["doFinally → closeAgents (:488)"]
+    RED --> CLOSE
 ```
 
 要点：规则先行省 LLM 成本；专家互相隔离（一个超时不拖垮整单）；同一批专家还被 `HarnessAgentFactory` 经 `builder.subagentFactory(name, id -> expert)` 注册为 harness subagent（第 7 章），主 Agent 也能通过 `agent_spawn` 委派——**同一组 Agent，两种编排入口**。
@@ -89,14 +140,20 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    U["用户: 我要退款"] --> AGENT["ReActAgent 推理<br/>产生 ToolUseBlock(submitRefund)"]
-    AGENT --> PERM["PermissionEngine 评估（第 3 章 3.5）<br/>PermissionConfig 声明式 ask 规则命中"]
+    U["用户：我要退款"] --> AGENT["ReActAgent 推理<br/>产生 ToolUseBlock(退款工具)"]
+    AGENT --> PERM["PermissionEngine 评估（第 3 章 3.5）<br/>PermissionConfig 按配置 addAskRule(tool, *, ASK)"]
     PERM --> ASKED["RequireUserConfirmEvent + PERMISSION_ASKING 终态<br/>状态落 StateStore，调用返回"]
-    ASKED --> CONFIRM["前端弹确认 → 用户批准<br/>下次 call 带 METADATA_CONFIRM_RESULTS<br/>→ doCallInner 情况4 → resumeAgent 直进 acting"]
-    AGENT --> HAND["或模型调 HumanHandoffTools#transferToHuman(@Tool)"]
-    HAND --> TICKET["TicketService#requestHandoff 工单推进 WAITING_AGENT<br/>+ HandoffService#create 坐席工作台 PENDING 单<br/>工单域失败只打日志，不阻断话术（fail-open）"]
+    ASKED --> CONFIRM["前端确认 → 下次 call 带 METADATA_CONFIRM_RESULTS<br/>→ doCallInner 情况 4 → resumeAgent 直进 acting"]
+    AGENT --> HAND["或模型调 HumanHandoffTools#transferToHuman (:50)"]
+    HAND --> HS["HandoffService#create (:87)"]
+    HS --> LEG{"isLegacyMode (:238) ？"}
+    LEG -->|"是"| LS["legacyStore.save 独立转人工单"]
+    LEG -->|"否"| TK["TicketService#findActiveBySession (:247)<br/>没有则 createForSession (:49)"]
+    TK --> RH["TicketService#requestHandoff (:70)<br/>AI_SERVING → WAITING_AGENT（BOT 发起）"]
+    RH --> EN["原状态为 AI_SERVING 时 fireEnrichment (:112)<br/>异步补全会话总结等信息"]
+    HAND -.->|"任何异常"| BUSY["onErrorResume：回复「人工坐席通道繁忙，已为您记录」<br/>不中断对话（fail-open）"]
     subgraph OBS["旁路观测"]
-        HAM["HumanApprovalMiddleware#onActing 告警埋点<br/>（真闸门在 PermissionEngine）"]
+        HAM["HumanApprovalMiddleware#onActing (:37)<br/>命中受控工具只打日志；order() = MiddlewareOrders.HUMAN_APPROVAL<br/>真正的闸门在 PermissionEngine"]
     end
     AGENT -.-> OBS
 ```
@@ -112,3 +169,52 @@ flowchart TB
 - **场景 14（定时任务）**：starter 走官方 `XxlJobAgentScheduler`（cron 只在 XXL-JOB 控制台配）；admin 的 `ScheduledTaskService#execute` 每次分配全新 sessionId 同步 `Agent#call` 并落执行历史——定时驱动下"每次执行独立会话"是刻意选择。
 - **场景 16（可观测）**：三套并存各管一段——`OtelTracingConfig`（OTel + OTLP gRPC，与自研 `LoggingTracer` 互斥）、`AgentCallTimingMiddleware`（`onModelCall` 取 `ChatUsage`、按 `ToolKindRegistry` 归类 TOOL/MCP/SKILL 分段耗时）、`JsonlTraceExporter`（数据飞轮 JSONL 落盘）。
 - **场景 17（热更新）**：`NacosPromptService`（系统提示词优先取 Nacos，回退内置 + `runtimeFacts()` 注入当前日期）+ `RuntimeConfigApplier` → `MutableDelegatingModel#swap`（第 5 章装饰器栈）+ `flushHotAgents` 清缓存不动 StateStore——**提示词、模型、Agent 缓存三层各自的热更新粒度**。
+
+### 场景 11 / 12 / 13 / 14 / 17 的方法级链路
+
+```mermaid
+flowchart LR
+    subgraph S11["场景 11：钉钉渠道（customer-channel 生产线）"]
+        D1["DingTalkStreamConnector#start (:63)<br/>复用框架 DingTalkStreamClient（WebSocket）"] --> D2["onMessage (:92)"]
+        D2 --> D3["ChannelMessagePipeline#submit (:38)<br/>按 serialKey 串行执行"]
+        D3 --> D4["handle (:45)<br/>非文本提示 · 新会话指令 → resetSession (:109)"]
+        D4 --> D5["AdminOpenApiClient#resolveSession (:104)<br/>per-message 模式则生成一次性会话"]
+        D5 --> D6["AdminOpenApiClient#chat (:150)<br/>POST admin 开放 API，blockLast(超时)"]
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph S12["场景 12：AG-UI"]
+        A1["CustomerServiceController#agui (:134)"] --> A2["AguiService#run (:60)<br/>Flux.using 按会话新建 Agent，结束时 closeQuietly"]
+        A2 --> A3["AguiAgentAdapter#run (框架 AguiAgentAdapter.java:125)<br/>AgentEvent → AguiEvent"]
+        A3 --> A4["AguiService#finalizeEvent (:82)<br/>按 messageId 累积文本，捕获终态"]
+        A4 --> A5["AguiEventEncoder#encode (框架 :52) → SSE"]
+    end
+    subgraph S13["场景 13：A2A 对外导出（admin）"]
+        B1["A2aController#agentCard (:78)<br/>→ AgentScopeA2aServer#getAgentCard (框架 :151)"]
+        B2["A2aController#jsonRpc (:92)<br/>→ AgentScopeA2aServer#getTransportWrapper (框架 :113)"] --> B3["AgentScopeAgentExecutor#execute (框架 :107)"]
+        B3 --> B4["AdminAgentRunner#streamEvents (:73)<br/>Flux.defer 包住装配异常 · 绑定租户与调用身份"]
+        B4 --> B5["AgentInstanceCache#getOrBuild (:46)<br/>与后台对话共用实例缓存"]
+        B5 --> B6["agentEvents (:130) → Agent#streamEvents"]
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph S14["场景 14：定时任务（admin）"]
+        T1["ScheduledTaskService#execute (:211)<br/>先插入执行记录"] --> T2["callAgent (:238)<br/>sessionId = sched-{taskCode}-{毫秒时间戳}"]
+        T2 --> T3["AdminAgentInstanceFactory#build (:367)<br/>contextFor (:332)"]
+        T3 --> T4["callWithContext (:278)<br/>ReActAgent 或 HarnessAgent#call<br/>block(executeTimeoutSeconds)"]
+    end
+    subgraph S17["场景 17：配置热更新（starter）"]
+        H1["NacosRuntimeConfigService#receiveConfigInfo (:182)<br/>→ applyConfig (:237)"] --> H2["RuntimeConfigApplier#apply (:139)<br/>synchronized · 先全量校验"]
+        H2 --> H3["ModelConfig#buildChain (:68)<br/>或按路由策略 / 在线实验构建新模型链"]
+        H3 --> H4["applyMcp · applyAgent<br/>→ NacosPromptService#updatePrompt (:109)"]
+        H4 --> H5["MutableDelegatingModel#swap (:47) 原子替换"]
+        H5 --> H6["CustomerServiceService#flushHotAgents (:751)<br/>清热缓存，StateStore 不动"]
+        H2 -.->|"任一步异常"| H7["保留旧配置，返回 false"]
+    end
+```
+
+场景 17 有一个设计点值得注意：**先把新模型链、MCP、Agent 配置全部准备好，最后才依次生效**。`RuntimeConfigApplier#apply` 在构建阶段任何一步出错都直接返回 `false`，旧配置原样保留；而 `swap` 与 `flushHotAgents` 放在最后，保证热 Agent 缓存被清空时，新模型链已经就位。

@@ -28,22 +28,32 @@ ReActAgent extends AgentBase implements AutoCloseable            (:215)
 
 ```mermaid
 flowchart TB
-    CALL["AgentBase#call<br/>(AgentBase.java:191, final)"] --> CI["ReActAgent#callInternal (:1012)"]
-    CI --> BAS["ReActAgent#buildAgentStream (:1038)<br/>发出 AgentStartEvent，包 onAgent 洋葱链"]
-    BAS --> RL["AgentBase#runLifecycle (:253)<br/>注册优雅停机 + 同会话串行闸门"]
-    RL --> BE["ReActAgent#beforeAgentExecution (:732)<br/>→ activateSlotForContext (:647)<br/>从 StateStore 加载 AgentState<br/>重建 PermissionEngine，恢复激活工具组"]
-    BE --> PRE["AgentBase#notifyPreCall (:739)<br/>seedSystemMsg 拼系统提示词<br/>+ onSystemPrompt 中间件 + PreCallEvent Hook"]
-    PRE --> DC["ReActAgent#doCall (:1195)<br/>→ CallExecution#doCallInner (:1730) 入口分流"]
-    DC --> LOOP{"ReAct 循环"}
-    LOOP --> R["CallExecution#reasoning (:2294)<br/>组装消息+工具 → 模型流式调用"]
-    R --> FIN{"CallExecution#isFinished (:3761)<br/>助手消息里还有 ToolUseBlock 吗？"}
-    FIN -->|"没有 → 终态"| SAVE
-    FIN -->|"有"| A["CallExecution#acting (:2717)<br/>权限评估 → 工具执行"]
-    A --> ITER["CallExecution#executeIteration(iter+1) (:2280)"]
+    CALL["AgentBase#call (AgentBase.java:191, final)"] --> CI["ReActAgent#callInternal (:1012)"]
+    CI --> BAS["ReActAgent#buildAgentStream (:1038)<br/>AgentStartEvent + onAgent 洋葱链"]
+    BAS --> RL["AgentBase#runLifecycle (:253)<br/>注册优雅停机 · serializeOnKey 同会话串行"]
+    RL --> RLB["AgentBase#runLifecycleBody (:300)"]
+    RLB --> BE["ReActAgent#beforeAgentExecution (:732)<br/>→ activateSlotForContext (:647) 加载 AgentState"]
+    BE --> PRE["AgentBase#notifyPreCall (:739)<br/>seedSystemMsg + onSystemPrompt + PreCallEvent"]
+    PRE --> DC["ReActAgent#doCall (:1195)<br/>→ CallExecution#doCallInner (:1730) 入口分流（3.3）"]
+    DC --> R["CallExecution#reasoning (:2294)<br/>onReasoning → onModelCall → Model#stream（3.4）"]
+    R --> PIPE["CallExecution#runPostReasoningPipeline (:2426)<br/>PostReasoning Hook：stopAgent / gotoReasoning 分支"]
+    PIPE --> FIN{"CallExecution#isFinished (:3761)<br/>无 ToolUseBlock 且有非空 TextBlock？"}
+    FIN -->|"是"| DONE(["终态 Msg"])
+    FIN -->|"否：有工具调用"| A["CallExecution#acting (:2717)"]
+    FIN -->|"否：无工具调用（空回复）"| REM["buildEmptyResponseReminder (:3789)<br/>提醒写入上下文"]
+    REM --> A
+    A --> DEN{"allRecentToolCallsDenied (:3806)<br/>最近一轮工具调用全被拒？"}
+    DEN -->|"否，有待执行工具"| TOOLS["actingStream (:2826)<br/>权限门 → 工具执行（3.5）<br/>暂停出口：PERMISSION_ASKING / TOOL_SUSPENDED"]
+    DEN -->|"是"| ALLD["emitAllToolsDeniedThroughMiddleware (:3828)"]
+    ALLD -->|"middleware 发出 RequestStopEvent"| DONE
+    ALLD -->|"无人叫停"| ITER
+    DEN -->|"否，无待执行工具（空回复那一轮）"| ITER
+    TOOLS --> ITER["CallExecution#executeIteration(iter+1) (:2280)"]
     ITER --> MAX{"iter >= maxIters ?"}
     MAX -->|"否"| R
-    MAX -->|"是"| SUM["CallExecution#summarizing (:3503)<br/>不带工具做最后总结<br/>GenerateReason.MAX_ITERATIONS"]
-    SUM --> SAVE["ReActAgent#saveStateToSession (:475)<br/>AgentStateStore#save"]
+    MAX -->|"是"| SUM["CallExecution#summarizing (:3503)<br/>不带工具总结 · MAX_ITERATIONS"]
+    SUM --> DONE
+    DONE --> SAVE["ReActAgent#saveStateToSession (:475)<br/>异常 / 空结果 / 中断出口见 3.6"]
     SAVE --> POST["AgentBase#notifyPostCall (:805)<br/>PostCallEvent Hook + 订阅者广播"]
     POST --> RES["发出 AgentResultEvent + AgentEndEvent<br/>call() 从事件流过滤出终态 Msg"]
 ```
@@ -61,6 +71,31 @@ flowchart TB
 | 3 | 无 pending 工具（最常见） | `addToContext(msgs)`（`:2257`）→ `coreAgent()`（`:2268`）→ `executeIteration(0)` |
 | 4 | 有 **ASKING** 状态的工具调用（上次因权限暂停） | 必须从 `Msg.METADATA_CONFIRM_RESULTS` 取 `List<ConfirmResult>`，否则抛带完整恢复指引的 `IllegalStateException`；有则 `applyConfirmResults` → `resumeAgent()`（`:2276`，**直接进 acting，不再推理**） |
 | 5 | 有 pending（externalTool 挂起）且用户带来了 `ToolResultBlock` | `validateAndAddToolResults` → `resumeAgent()` 或 `coreAgent()` |
+
+同一段逻辑按源码分支顺序画成图（每个菱形对应 `doCallInner` 里的一个 `if`）：
+
+```mermaid
+flowchart TB
+    DCI["CallExecution#doCallInner (:1730)"] --> SD{"GracefulShutdownManager#<br/>checkAndClearShutdownInterruptedForState (:160)"}
+    SD -->|"是：上次被停机打断（情况 1）"| DROP["msgs = List.of()<br/>丢弃客户端重发的输入"]
+    SD -->|"否"| P
+    DROP --> P{"getPendingToolUseIds (:2158)<br/>为空？"}
+    P -->|"是：最常见（情况 3）"| NORMAL["addToContext (:2257)<br/>→ coreAgent (:2268) → executeIteration(0)"]
+    P -->|"否"| ASK{"askingToolCalls (:3954)<br/>有 ASKING 状态的调用？"}
+    ASK -->|"是（情况 4）"| CONF["validateAndAcceptConfirmResults (:1831)<br/>→ extractConfirmResults (:1801)<br/>取不到则抛带恢复指引的 IllegalStateException<br/>→ applyConfirmResults (:1966)"]
+    CONF --> RESUME["resumeAgent (:2276)<br/>直接进 acting，不再推理"]
+    ASK -->|"否"| REC{"enablePendingToolRecovery ?"}
+    REC -->|"是（情况 2）"| PATCH["maybePatchPendingToolCalls (:2038)<br/>为孤儿调用合成错误结果"]
+    PATCH -->|"补齐后无 pending"| NORMAL
+    PATCH -->|"仍有 pending"| EMPTY
+    REC -->|"否"| EMPTY{"msgs 为空？"}
+    EMPTY -->|"是"| RESUME
+    EMPTY -->|"否"| TR{"msgs 里带 ToolResultBlock？"}
+    TR -->|"是（情况 5）"| VAL["validateAndAddToolResults (:2192)"]
+    VAL -->|"仍有 pending"| RESUME
+    VAL -->|"全部补齐"| NORMAL
+    TR -->|"否"| THROW["IllegalStateException<br/>Pending tool calls exist without results"]
+```
 
 情况 4/5 就是 HITL 与外部工具执行的"断点续跑"机制：**暂停不是线程阻塞，而是终态返回 + 状态落库；恢复是带着确认结果重新 call**。无状态服务因此天然支持"确认请求落在副本 A、确认结果回到副本 B"。
 
@@ -109,7 +144,7 @@ sequenceDiagram
     RC-->>R: 完整助手消息 Msg
 ```
 
-**`ReasoningContext` 会把厂商私有 metadata 一路带到终态消息上**（`agent/accumulator/ReasoningContext.java`）：累加分片时把每个 `ChatResponse.getMetadata()` 并进一张 `responseMetadata` 表，`buildFinalMessage()` 以它为底再叠加 `ChatUsage`，最终写进 `Msg.metadata`。这条通路是给"必须原样回传给厂商"的字段准备的——典型是 OpenAI 推理模型的 `openai.reasoning.encrypted_content`：下一轮请求要把它带回去，模型才能续上加密的推理链。丢了它，多轮推理的连续性就断了。这也是第 2 章 `Msg.metadata` 那张约定表之外、**由框架自动写入**的一类 key。
+**`ReasoningContext` 会把厂商私有 metadata 一路带到终态消息上**（`agent/accumulator/ReasoningContext.java`）：累加分片时把每个 `ChatResponse.getMetadata()` 并进一张 `responseMetadata` 表，`buildFinalMessage()` 以它为底再叠加 `ChatUsage`，最终写进 `Msg.metadata`。这条通路是给"必须原样回传给厂商"的字段准备的——典型是 OpenAI 推理模型的 `openai.reasoning.encrypted_content`：下一轮请求要把它带回去，模型才能续上加密的推理链。丢了它，多轮推理的连续性就断了。这也是第 2 章 `Msg.metadata` 那张约定表之外、**由框架自动写入**的一类 key。2.0.3 在这条通路上有两处保真缺陷（多分片 `reasoning_details` 只剩最后一片、`thought_signature` 经会话持久化后丢失），main 已修复但未发版，详见第 2 章 2.1。
 
 `runPostReasoningPipeline`（`:2426`）的分支决定循环去向：
 
@@ -164,7 +199,7 @@ flowchart TB
     NEXT -->|"无"| ITER["syncToolkitToState (:4433)<br/>→ executeIteration(iter+1) 回到推理，闭环"]
 ```
 
-**先看有没有必要进引擎**：`evaluatePermissions`（`:3152`）开头判 `state.getPermissionContext().isTrivial()`——当 `mode == DEFAULT` 且 workingDirectories / allow / deny / ask 四张表全空时，整个 `PermissionEngine` 被跳过，`evaluateOne`（`:3177`）直接调 `ToolBase#checkPermissions`。没配任何权限规则的普通 Agent 因此不为权限付出任何额外代价。另外，已被用户确认提升为 `ToolCallState.ALLOWED` 的工具调用会在 `evaluateOne` 最开头短路返回 `ALLOW`，不重复过引擎。
+**先看有没有必要进引擎**：`evaluatePermissions`（`:3152`）开头判 `state.getPermissionContext().isTrivial()`——当 `mode == DEFAULT` 且 workingDirectories / allow / deny / ask 四张表全空时，整个 `PermissionEngine` 被跳过，`evaluateOne`（`:3177`）直接调 `ToolBase#checkPermissions`。没配任何权限规则的普通 Agent 因此不为权限付出任何额外代价。另外，已被用户确认提升为 `ToolCallState.ALLOWED` 的工具调用会在 `evaluateOne` 最开头短路返回 `ALLOW`，不重复过引擎。紧接着还有第二个短路：工具如果**不是 `ToolBase` 子类**（`:3183`），同样直接 `ALLOW`。core 自带的 `ShellCommandTool`、`SubAgentTool` 就属于这种情况，权限规则对它们不生效（第 4 章 4.2）。
 
 裁决结果是 `PermissionBehavior` 四值：`DENY`（进 autoDeniedIds）、`ASK`（进 pendingAsk）、`ALLOW` / `PASSTHROUGH`（放行执行）。
 
@@ -206,9 +241,46 @@ merged = ctx.putAll(parentCtx)
 1. 为未完成的 pending 工具合成"因达到最大迭代被取消"的错误结果；
 2. `publishEvent(new ExceedMaxItersEvent(...))`；
 3. `firePreSummary` → `summaryStream`（结构同 `reasoningStream` 但**不传 tools**，模型只能输出文字总结）→ `firePostSummary`；
-4. 结果打上 `GenerateReason.MAX_ITERATIONS` 入上下文；异常走 `handleSummaryError`（`:3709`）。
+4. 结果打上 `GenerateReason.MAX_ITERATIONS` 入上下文；异常走 `handleSummaryError`（`:3709`）——注意 2.0.3 这条错误路径构造的消息**没有设置 reason**，而 `Msg#getGenerateReason()` 缺省返回 `MODEL_STOP`，调用方会误判为正常结束（详见第 2 章 2.2，main 已修复，未发版）。
 
-无论从哪个出口离开循环，`ReActAgent#doCall`（`:1195`）都保证 `saveStateToSession(scope)` 执行（`.flatMap(r -> saveStateToSession(scope).thenReturn(r))`），随后 `AgentBase#notifyPostCall`（`AgentBase.java:805`）触发 PostCall Hook 并向 `observe` 订阅者广播。
+`ReActAgent#doCall`（`:1195`）在循环外面挂了保存，随后 `AgentBase#notifyPostCall`（`AgentBase.java:805`）触发 PostCall Hook 并向 `observe` 订阅者广播。保存的写法决定了它覆盖哪些出口：
+
+```java
+return scope.doCallInner(msgs)
+        .onErrorResume(error -> saveStateAfterCallFailure(scope, error))   // 出错：先存再抛原异常
+        .flatMap(result -> saveStateToSession(scope).thenReturn(result));  // 有结果：存完再返回
+```
+
+`flatMap` 只在上游**发出元素**时才执行。所以 2.0.3 里有一个出口不落盘：`doCallInner` **以空 `Mono` 完成**时——例如模型流一个分片都没返回（普通推理、结构化输出的原生与兜底两条路径都会出现），这一轮用户的输入就不会被保存，下次调用看不到上一个问题。"无论从哪个出口都保证保存"在 2.0.3 上不成立。
+
+> **main 已变更（未发版）**：两处 `doCall` 都补了 `.switchIfEmpty(Mono.defer(() -> saveStateToSession(scope).then(Mono.empty())))`，空结果也落盘（#3049）。
+
+把正常、空结果、异常、中断四类出口放在一起看，状态在哪一步落盘、异常在哪一层被接住：
+
+```mermaid
+flowchart TB
+    DCI["CallExecution#doCallInner (:1730)"] --> SIG{"上游信号"}
+    SIG -->|"发出终态 Msg"| SAVE["ReActAgent#saveStateToSession (:475)<br/>→ persistAgentStateCas (:536)（第 2 章 2.5）"]
+    SIG -->|"空完成"| SKIP["2.0.3：flatMap 不执行，不落盘<br/>（main #3049 已补 switchIfEmpty）"]
+    SIG -->|"错误"| SF["ReActAgent#saveStateAfterCallFailure (:511)"]
+    SF --> INT{"ExceptionUtils#containsInterruptedException (:71)"}
+    INT -->|"否"| SF2["saveStateToSession<br/>保存再失败只 addSuppressed<br/>→ Mono.error(原异常)"]
+    INT -->|"是"| PASS["原样 Mono.error<br/>交给中断链路统一处理"]
+    SAVE --> POST["AgentBase#notifyPostCall (:805)"]
+    SAVE -->|"保存本身抛异常<br/>（位于 onErrorResume 下游）"| EH
+    SF2 --> EH["AgentBase#createErrorHandler (:495)<br/>挂在 runLifecycleBody (:300) 的 onErrorResume 上"]
+    PASS --> EH
+    EH --> IE{"InterruptedException？"}
+    IE -->|"否"| NE["AgentBase#notifyError (:825)<br/>→ 异常抛给调用方"]
+    IE -->|"是"| HI["ReActAgent#handleInterrupt (:4041)"]
+    HI --> SRC{"InterruptSource"}
+    SRC -->|"SYSTEM：优雅停机"| SYS["GracefulShutdownManager#saveOnInterruptObserved (:236)<br/>→ AgentShuttingDownException"]
+    SRC -->|"USER：用户中断"| USR["synthesizeErrorResultsForPendingToolCalls (:2097)<br/>+ GenerateReason.INTERRUPTED 回复<br/>→ saveStateToSession"]
+```
+
+图里有三个值得记住的边界：**中断不在 `doCall` 这层存**，统一交给 `handleInterrupt` 处理；**保存失败会越过 `saveStateAfterCallFailure`**，因为保存挂在 `onErrorResume` 的下游；**两种中断的落盘方式不同**：用户中断会先给悬空的工具调用合成错误结果，再追加一条 `INTERRUPTED` 回复后保存，存下来的状态是自洽的；停机中断不产出回复，由 `saveOnInterruptObserved` 通过 `ActiveRequestContext#saveState` 按当时的状态**原样保存**，悬空的工具调用会留到下一次调用——那时由 3.3 的情况 1 丢弃重复输入，再按情况 2 或 5 处理这些 pending 调用。
+
+还有一个同样由这段写法带来的后果：保存本身若抛异常（比如第 2 章 2.5 讲的 2.0.3 `OVERWRITE` 缺陷），因为 `flatMap` 在 `onErrorResume` **下游**，失败保存逻辑兜不住，异常会直接抛给调用方。**`onErrorResume` 只管得到它上游的错误**，这是读 Reactor 链时最容易看漏的地方。
 
 **失败路径也要落盘**。`doCall` / `doStructuredCall` 都挂了 `.onErrorResume(error -> saveStateAfterCallFailure(scope, error))`：模型调用中途炸了（超时、限流、鉴权失败），本轮已经进入 `AgentState.context` 的用户消息、上一轮的工具结果不能丢，否则用户重试时上下文断层。这个方法有三条规矩：
 
@@ -220,7 +292,11 @@ merged = ctx.putAll(parentCtx)
 
 ## 3.7 结构化输出：双路径自动降级
 
-`ReActAgent#doStructuredCall`（`:1239`），供 `call(prompt, IntentResult.class, ctx)` 这类重载使用：
+`ReActAgent#doStructuredCall`（`:1239`），供 `call(prompt, IntentResult.class, ctx)` 这类重载使用。它的第一步是 `JsonSchemaUtils#generateSchemaFromClass`（`:1251`）把 Java 类转成 JSON Schema。
+
+> **main 已变更（未发版）**：2.0.3 的 `JsonSchemaUtils` 在整个 JVM 里共享一个静态的 victools `SchemaGenerator`（`JsonSchemaUtils.java:62`），它内部的 Jackson 内省缓存是非同步的 `Map`。**同一进程里任意多个结构化输出调用并发时（不限于同一个 Agent 实例），都会在这个生成器上产生竞争**，生成的 schema 可能出错。main 用一把全局锁把生成过程串行化了（#2796）。在 2.0.3 上的规避办法：启动时单线程调一次 `JsonSchemaUtils` 生成 schema 并转成 `JsonNode` 缓存起来，调用时改用 `call(msgs, JsonNode schema)` 重载（`AgentBase.java:392`）。这条路径走的是 `generateSchemaFromJsonNode`，只做类型转换，不碰共享生成器。
+
+调用链：
 
 ```mermaid
 flowchart LR

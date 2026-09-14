@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 1204" role="img" aria-label="agent.call 宏观调用链：公共入口 AgentBase#call 经 callInternal、buildAgentStream 的 onAgent 中间件、runLifecycle 串行闸门与 CallExecution 作用域进入 reasoning 与 acting 循环，直到 isFinished 后保存状态并返回最终 Msg" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 1400" role="img" aria-label="agent.call 宏观调用链（v2.0.3）：公共入口 AgentBase#call 经 callInternal、buildAgentStream 的 onAgent 中间件、runLifecycle 串行闸门进入 CallExecution；doCallInner 入口分流后在 reasoning 与 acting 之间循环，isFinished 要求无工具调用且有非空文本，空回复注入提醒再推一轮，全员被拒可叫停；最终经 saveStateToSession 的 CAS 保存与 notifyPostCall 返回，异常、空结果与中断各有独立出口" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif">
   <defs>
     <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0L10 5L0 10z" fill="#5b7392"/>
@@ -15,22 +15,22 @@
   </defs>
 
   <!-- 卡片底 -->
-  <rect x="0" y="0" width="980" height="1204" rx="16" fill="#0b1220" stroke="#1f2b3e"/>
+  <rect x="0" y="0" width="980" height="1400" rx="16" fill="#0b1220" stroke="#1f2b3e"/>
 
   <!-- 标题 -->
   <text x="36" y="52" font-size="22" font-weight="700" fill="#e8f0fa"><tspan font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">agent.call(msgs)</tspan> 宏观调用链</text>
-  <text x="924" y="52" font-size="11" fill="#8fa3bb" text-anchor="end">AgentScope Java 2.0 · 对应《03-ReAct主循环》</text>
-  <text x="36" y="78" font-size="12.5" fill="#8fa3bb">五层结构：公共入口 → 事件流封装 → 生命周期 → per-call ReAct 循环 → 收尾持久化 · 图中类名#方法名与正文一一对应</text>
+  <text x="944" y="52" font-size="11" fill="#8fa3bb" text-anchor="end">AgentScope Java v2.0.3 · 对应《03-ReAct主循环》3.2 / 3.3 / 3.6</text>
+  <text x="36" y="78" font-size="12.5" fill="#8fa3bb">五层结构：公共入口 → 事件流封装 → 生命周期 → per-call ReAct 循环 → 收尾持久化与异常出口 · 括号内为 ReActAgent.java 行号（另注明者除外）</text>
 
   <!-- ① 公共入口 -->
   <rect x="36" y="104" width="908" height="104" rx="12" fill="#101a2b" stroke="#22304a"/>
   <text x="56" y="130" font-size="13" font-weight="700" fill="#b9c9dd"><tspan fill="#6cb2ff">①</tspan> 公共入口 · AgentBase</text>
   <rect x="56" y="144" width="396" height="50" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="72" y="165" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">AgentBase#call(List&lt;Msg&gt;)<tspan fill="#8fa3bb">  · final</tspan></text>
+  <text x="72" y="165" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">AgentBase#call(List&lt;Msg&gt;)<tspan fill="#8fa3bb" dx="8">AgentBase:191 · final</tspan></text>
   <text x="72" y="183" font-size="11" fill="#8fa3bb">外部入口 · 固定走 this::doCall，子类不可改流程</text>
   <line x1="452" y1="169" x2="502" y2="169" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
   <rect x="508" y="144" width="416" height="50" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="524" y="165" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">ReActAgent#callInternal(msgs, ctx, this::doCall)</text>
+  <text x="524" y="165" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">ReActAgent#callInternal<tspan fill="#8fa3bb" dx="8">(:1012)</tspan></text>
   <text x="524" y="183" font-size="11" fill="#8fa3bb">覆写：不直接跑 lifecycle，借事件流提取最终结果</text>
   <line x1="490" y1="208" x2="490" y2="232" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
 
@@ -38,104 +38,137 @@
   <rect x="36" y="236" width="908" height="150" rx="12" fill="#101a2b" stroke="#22304a"/>
   <text x="56" y="262" font-size="13" font-weight="700" fill="#b9c9dd"><tspan fill="#6cb2ff">②</tspan> 事件流封装 + onAgent 中间件 · ReActAgent</text>
   <rect x="56" y="276" width="560" height="94" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="72" y="300" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">buildAgentStream(msgs, ctx, doCallFn)</text>
-  <text x="72" y="320" font-size="11" fill="#8fa3bb">call() 与 streamEvents() 的共享核心 · EVENT_SINK_KEY 写进 Reactor Context</text>
-  <text x="72" y="340" font-size="11" fill="#8fa3bb">AgentStartEvent → <tspan fill="#c398f7">onAgent 洋葱链（MiddlewareChain#build，最外层）</tspan></text>
-  <text x="72" y="358" font-size="11" fill="#8fa3bb">…流结束 → AgentResultEvent → AgentEndEvent</text>
+  <text x="72" y="300" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">buildAgentStream<tspan fill="#8fa3bb" dx="8">(:1038) · call() 与 streamEvents() (:1113) 共享</tspan></text>
+  <text x="72" y="320" font-size="11" fill="#8fa3bb">Flux.create(sink, BUFFER) · EVENT_SINK_KEY 与 AgentEventEmitter 写进 Context</text>
+  <text x="72" y="340" font-size="11" fill="#8fa3bb">AgentStartEvent → <tspan fill="#c398f7">onAgent 洋葱链（MiddlewareChain#build，按 order() 排序后折叠）</tspan></text>
+  <text x="72" y="358" font-size="11" fill="#8fa3bb">有终态 Msg 才发 AgentResultEvent · doFinally → AgentEndEvent</text>
   <line x1="616" y1="322" x2="642" y2="322" stroke="#5b7392" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah)"/>
   <rect x="648" y="276" width="276" height="94" rx="10" fill="none" stroke="#3b4d68" stroke-dasharray="5 4"/>
   <text x="664" y="300" font-size="11" fill="#8fa3bb">call() 的取值方式：</text>
   <text x="664" y="320" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#dbe7f3">.filter(AgentResultEvent)</text>
   <text x="664" y="338" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#dbe7f3">.takeLast(1).next()</text>
-  <text x="664" y="356" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#4ade80">→ 最终 Msg</text>
+  <text x="664" y="356" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#4ade80">→ 最终 Msg<tspan fill="#fcd34d">（无结果则为空）</tspan></text>
   <line x1="490" y1="386" x2="490" y2="410" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
 
   <!-- ③ 生命周期 -->
   <rect x="36" y="414" width="908" height="172" rx="12" fill="#101a2b" stroke="#22304a"/>
   <text x="56" y="440" font-size="13" font-weight="700" fill="#b9c9dd"><tspan fill="#6cb2ff">③</tspan> 生命周期 · AgentBase</text>
   <rect x="56" y="454" width="400" height="50" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="72" y="475" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">runLifecycle(msgs, doCallFn)</text>
-  <text x="72" y="493" font-size="11" fill="#8fa3bb">Mono.using 取执行资源 · 注册优雅停机 request</text>
+  <text x="72" y="475" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">runLifecycle<tspan fill="#8fa3bb" dx="8">AgentBase:253</tspan></text>
+  <text x="72" y="493" font-size="11" fill="#8fa3bb">注册优雅停机 request · 进入串行闸门</text>
   <line x1="456" y1="479" x2="518" y2="479" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
   <rect x="524" y="454" width="400" height="50" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="540" y="475" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">serializeOnKey((userId, sessionId))</text>
-  <text x="540" y="493" font-size="11" fill="#8fa3bb">同会话串行闸门 · 跨会话并行</text>
+  <text x="540" y="475" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">serializeOnKey((userId, sessionId))<tspan fill="#8fa3bb" dx="8">AgentBase:345</tspan></text>
+  <text x="540" y="493" font-size="11" fill="#8fa3bb">同会话串行闸门 · 跨会话并行（仅单进程内）</text>
   <line x1="490" y1="506" x2="490" y2="518" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
-  <text x="502" y="515" font-size="11" fill="#8fa3bb">runLifecycleBody — 固定三段</text>
+  <text x="502" y="515" font-size="11" fill="#8fa3bb">runLifecycleBody（AgentBase:300）— 固定三段，出错交 createErrorHandler（⑤）</text>
   <rect x="56" y="520" width="272" height="48" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="70" y="539" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">beforeAgentExecution(msgs, rc)</text>
-  <text x="70" y="556" font-size="10.5" fill="#8fa3bb">建 CallExecution · 加载 AgentState</text>
+  <text x="70" y="539" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">beforeAgentExecution<tspan fill="#8fa3bb" dx="6">(:732)</tspan></text>
+  <text x="70" y="556" font-size="10.5" fill="#8fa3bb">activateSlotForContext (:647) 加载状态</text>
   <line x1="328" y1="544" x2="350" y2="544" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
   <rect x="356" y="520" width="272" height="48" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="370" y="539" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">notifyPreCall(msgs, scope)</text>
+  <text x="370" y="539" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">notifyPreCall<tspan fill="#8fa3bb" dx="6">AgentBase:739</tspan></text>
   <text x="370" y="556" font-size="10.5" fill="#8fa3bb">seedSystemMsg + onSystemPrompt 中间件</text>
   <line x1="628" y1="544" x2="650" y2="544" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
   <rect x="656" y="520" width="268" height="48" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="670" y="539" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">doCall(msgs)</text>
-  <text x="670" y="556" font-size="10.5" fill="#8fa3bb">进入 per-call ReAct 作用域 ↓</text>
+  <text x="670" y="539" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">doCall<tspan fill="#8fa3bb" dx="6">(:1195)</tspan></text>
+  <text x="670" y="556" font-size="10.5" fill="#8fa3bb">绑定 eventSink · 进入 per-call 作用域 ↓</text>
   <line x1="490" y1="586" x2="490" y2="606" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
 
   <!-- ④ per-call ReAct 核心循环 -->
-  <rect x="36" y="610" width="908" height="396" rx="12" fill="#101a2b" stroke="#22304a"/>
-  <text x="56" y="636" font-size="13" font-weight="700" fill="#b9c9dd"><tspan fill="#6cb2ff">④</tspan> per-call ReAct 核心循环 · CallExecution（内部类：持有本次调用的 AgentState / PermissionEngine / eventSink）</text>
-  <rect x="56" y="650" width="868" height="74" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="72" y="674" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">doCall(msgs) → doCallInner(msgs)<tspan font-family="-apple-system, 'Segoe UI', 'PingFang SC', sans-serif" fill="#8fa3bb">  — 入口分流：先看上下文有无悬而未决的工具调用</tspan></text>
-  <text x="72" y="702" font-size="11" fill="#8fa3bb">▸ 无 pending 工具 → coreAgent()</text>
-  <text x="372" y="702" font-size="11" fill="#8fa3bb">▸ ASKING → applyConfirmResults → resumeAgent()</text>
-  <text x="668" y="702" font-size="11" fill="#8fa3bb">▸ 外部工具结果带回 → resumeAgent()</text>
-  <line x1="255" y1="724" x2="255" y2="776" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
-  <text x="263" y="752" font-size="11" fill="#8fa3bb">coreAgent() → executeIteration(0)</text>
-  <line x1="769" y1="724" x2="769" y2="776" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
-  <text x="761" y="752" font-size="11" fill="#8fa3bb" text-anchor="end">resumeAgent() 直进 acting</text>
+  <rect x="36" y="610" width="908" height="450" rx="12" fill="#101a2b" stroke="#22304a"/>
+  <text x="56" y="636" font-size="13" font-weight="700" fill="#b9c9dd"><tspan fill="#6cb2ff">④</tspan> per-call ReAct 核心循环 · CallExecution (:1638)（持有本次调用的 AgentState / PermissionEngine / eventSink）</text>
+  <rect x="56" y="650" width="868" height="92" rx="10" fill="#16233a" stroke="#2d415f"/>
+  <text x="72" y="674" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">doCallInner<tspan fill="#8fa3bb" dx="6">(:1730)</tspan><tspan font-family="-apple-system, 'Segoe UI', 'PingFang SC', sans-serif" fill="#8fa3bb" dx="8">— 入口分流：先查停机中断标记，再看上下文有无悬而未决的工具调用</tspan></text>
+  <text x="72" y="700" font-size="11" fill="#8fa3bb">▸ 上次被停机打断 → 丢弃重发输入（GracefulShutdownManager:160）</text>
+  <text x="508" y="700" font-size="11" fill="#8fa3bb">▸ 无 pending 工具 → coreAgent (:2268)</text>
+  <text x="72" y="724" font-size="11" fill="#8fa3bb">▸ ASKING → applyConfirmResults (:1966) → resumeAgent (:2276)</text>
+  <text x="508" y="724" font-size="11" fill="#8fa3bb">▸ 外部结果 / 开启恢复 → validateAndAddToolResults · maybePatch</text>
+  <line x1="206" y1="742" x2="206" y2="786" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <text x="214" y="768" font-size="10.5" fill="#8fa3bb">executeIteration(0) (:2280)</text>
+  <line x1="774" y1="742" x2="774" y2="786" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <text x="766" y="768" font-size="10.5" fill="#8fa3bb" text-anchor="end">resumeAgent 直进 acting</text>
 
-  <rect x="100" y="780" width="310" height="100" rx="10" fill="#10231b" stroke="#2e6b50"/>
-  <text x="116" y="803" font-size="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#4ade80">reasoning(iter)</text>
-  <text x="116" y="821" font-size="10.5" fill="#8fa3bb">firePreReasoning → onReasoning 中间件</text>
-  <text x="116" y="838" font-size="10.5" fill="#8fa3bb">modelCallStream：模型流式调用 · 逐片累加</text>
-  <text x="116" y="855" font-size="10.5" fill="#8fa3bb">runPostReasoningPipeline → 助手消息入 context</text>
-  <text x="116" y="872" font-size="10.5" fill="#fcd34d">iter ≥ maxIters → summarizing() 总结收尾</text>
+  <rect x="56" y="790" width="300" height="128" rx="10" fill="#10231b" stroke="#2e6b50"/>
+  <text x="72" y="813" font-size="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#4ade80">reasoning(iter)<tspan fill="#8fa3bb" font-size="11" dx="6">(:2294)</tspan></text>
+  <text x="72" y="834" font-size="10.5" fill="#8fa3bb">onReasoning → onModelCall 中间件</text>
+  <text x="72" y="853" font-size="10.5" fill="#8fa3bb">modelCallStream (:2533) 逐片累加</text>
+  <text x="72" y="872" font-size="10.5" fill="#8fa3bb">runPostReasoningPipeline (:2426)</text>
+  <text x="72" y="898" font-size="10.5" fill="#fcd34d">iter ≥ maxIters → summarizing (:3503)</text>
 
-  <rect x="614" y="780" width="310" height="100" rx="10" fill="#241d0e" stroke="#6e5a22"/>
-  <text x="630" y="803" font-size="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#fcd34d">acting(iter)</text>
-  <text x="630" y="821" font-size="10.5" fill="#8fa3bb">extractPendingToolCalls → firePreActing</text>
-  <text x="630" y="838" font-size="10.5" fill="#8fa3bb">evaluatePermissions 权限门（PermissionEngine）</text>
-  <text x="630" y="855" font-size="10.5" fill="#8fa3bb">runToolBatch → executeToolCalls 真正执行</text>
-  <text x="630" y="872" font-size="10.5" fill="#8fa3bb">notifyPostActingHook → 工具结果入 context</text>
+  <rect x="624" y="790" width="300" height="128" rx="10" fill="#241d0e" stroke="#6e5a22"/>
+  <text x="640" y="813" font-size="13" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#fcd34d">acting(iter)<tspan fill="#8fa3bb" font-size="11" dx="6">(:2717)</tspan></text>
+  <text x="640" y="834" font-size="10.5" fill="#8fa3bb">allRecentToolCallsDenied (:3806)</text>
+  <text x="640" y="853" font-size="10.5" fill="#8fa3bb">actingStream (:2826) → 权限门 (:3150)</text>
+  <text x="640" y="872" font-size="10.5" fill="#8fa3bb">runToolBatch (:2914) → 执行工具</text>
+  <text x="640" y="898" font-size="10.5" fill="#8fa3bb">notifyPostActingHook (:3467) 结果入 context</text>
 
-  <line x1="410" y1="800" x2="608" y2="800" stroke="#fcd34d" stroke-width="1.6" marker-end="url(#ah-amber)"/>
-  <text x="512" y="792" font-size="10" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#fcd34d" text-anchor="middle">isFinished=false 有工具调用</text>
-  <line x1="614" y1="860" x2="416" y2="860" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
-  <text x="512" y="852" font-size="10" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#8fa3bb" text-anchor="middle">executeIteration(iter + 1)</text>
+  <line x1="356" y1="814" x2="618" y2="814" stroke="#fcd34d" stroke-width="1.6" marker-end="url(#ah-amber)"/>
+  <text x="490" y="806" font-size="10" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#fcd34d" text-anchor="middle">isFinished=false：有工具调用</text>
+  <line x1="356" y1="852" x2="618" y2="852" stroke="#fcd34d" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah-amber)"/>
+  <text x="490" y="844" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#fcd34d" text-anchor="middle">空回复 → buildEmptyResponseReminder (:3789)</text>
+  <line x1="624" y1="892" x2="362" y2="892" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <text x="490" y="884" font-size="10" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#8fa3bb" text-anchor="middle">executeIteration(iter+1) (:2280)</text>
 
-  <line x1="255" y1="880" x2="255" y2="936" stroke="#4ade80" stroke-width="1.6" marker-end="url(#ah-green)"/>
-  <text x="263" y="912" font-size="10.5" fill="#4ade80">isFinished=true：无工具调用</text>
-  <line x1="769" y1="880" x2="769" y2="936" stroke="#f87171" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah-red)"/>
-  <text x="761" y="912" font-size="10.5" fill="#f87171" text-anchor="end">需人工确认 / externalTool 挂起</text>
+  <line x1="206" y1="918" x2="206" y2="976" stroke="#4ade80" stroke-width="1.6" marker-end="url(#ah-green)"/>
+  <text x="214" y="942" font-size="10" fill="#4ade80">isFinished=true (:3761)</text>
+  <text x="214" y="958" font-size="10" fill="#4ade80">无 ToolUse 且有非空文本</text>
+  <polyline points="660,918 660,948 500,948 500,976" fill="none" stroke="#f87171" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah-red)"/>
+  <text x="668" y="940" font-size="10" fill="#f87171">全被拒且有人叫停</text>
+  <line x1="830" y1="918" x2="830" y2="976" stroke="#f87171" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ah-red)"/>
+  <text x="838" y="950" font-size="10" fill="#f87171">需确认 / 挂起</text>
 
-  <rect x="84" y="940" width="340" height="52" rx="10" fill="#10231b" stroke="#2e6b50"/>
-  <text x="100" y="961" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#4ade80">终态 Msg ✓</text>
-  <text x="100" y="979" font-size="10.5" fill="#8fa3bb">GenerateReason 标注产生原因 · 六个出口可循枚举定位</text>
-  <rect x="600" y="940" width="324" height="52" rx="10" fill="#251316" stroke="#6e2f37"/>
-  <text x="616" y="961" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#f87171">PERMISSION_ASKING / TOOL_SUSPENDED</text>
-  <text x="616" y="979" font-size="10.5" fill="#8fa3bb">暂停返回 · 状态落库 · 下次 call 带结果恢复</text>
-  <polyline points="254,992 254,1012 490,1012 490,1024" fill="none" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <rect x="56" y="980" width="320" height="64" rx="10" fill="#10231b" stroke="#2e6b50"/>
+  <text x="72" y="1000" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#4ade80">终态 Msg ✓</text>
+  <text x="72" y="1018" font-size="10" fill="#8fa3bb">MODEL_STOP / STRUCTURED_OUTPUT / MAX_ITERATIONS</text>
+  <text x="72" y="1034" font-size="10" fill="#fcd34d">⚠ 未标记的消息缺省读作 MODEL_STOP</text>
+  <rect x="392" y="980" width="216" height="64" rx="10" fill="#251316" stroke="#6e2f37"/>
+  <text x="408" y="1000" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#f87171">叫停出口</text>
+  <text x="408" y="1018" font-size="10" fill="#8fa3bb">ALL_TOOLS_DENIED (:3828)</text>
+  <text x="408" y="1034" font-size="10" fill="#8fa3bb">三种 *_STOP_REQUESTED</text>
+  <rect x="624" y="980" width="300" height="64" rx="10" fill="#251316" stroke="#6e2f37"/>
+  <text x="640" y="1000" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#f87171">PERMISSION_ASKING / TOOL_SUSPENDED</text>
+  <text x="640" y="1018" font-size="10" fill="#8fa3bb">暂停返回 · 状态落库</text>
+  <text x="640" y="1034" font-size="10" fill="#8fa3bb">下次 call 带 ConfirmResult / ToolResultBlock 恢复</text>
+  <line x1="490" y1="1060" x2="490" y2="1084" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
 
-  <!-- ⑤ 收尾持久化 -->
-  <rect x="36" y="1028" width="908" height="108" rx="12" fill="#101a2b" stroke="#22304a"/>
-  <text x="56" y="1054" font-size="13" font-weight="700" fill="#b9c9dd"><tspan fill="#6cb2ff">⑤</tspan> 收尾持久化</text>
-  <rect x="56" y="1066" width="270" height="52" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="72" y="1087" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">saveStateToSession(scope)</text>
-  <text x="72" y="1105" font-size="10.5" fill="#8fa3bb">AgentStateStore#save · boundedElastic</text>
-  <line x1="326" y1="1092" x2="350" y2="1092" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
-  <rect x="356" y="1066" width="270" height="52" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="372" y="1087" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">notifyPostCall(finalMsg)</text>
-  <text x="372" y="1105" font-size="10.5" fill="#8fa3bb">PostCall Hook + observe 订阅者广播</text>
-  <line x1="626" y1="1092" x2="650" y2="1092" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
-  <rect x="656" y="1066" width="268" height="52" rx="10" fill="#16233a" stroke="#2d415f"/>
-  <text x="670" y="1087" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">AgentResultEvent → AgentEndEvent</text>
-  <text x="670" y="1105" font-size="10.5" fill="#8fa3bb">callInternal filter 出 Msg 返回调用方</text>
+  <!-- ⑤ 收尾持久化与异常出口 -->
+  <rect x="36" y="1088" width="908" height="236" rx="12" fill="#101a2b" stroke="#22304a"/>
+  <text x="56" y="1114" font-size="13" font-weight="700" fill="#b9c9dd"><tspan fill="#6cb2ff">⑤</tspan> 收尾持久化与异常出口 · doCall 的 Reactor 链决定谁被保存</text>
+  <rect x="56" y="1128" width="200" height="52" rx="10" fill="#16233a" stroke="#2d415f"/>
+  <text x="70" y="1149" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">saveStateToSession<tspan fill="#8fa3bb" dx="6">:475</tspan></text>
+  <text x="70" y="1167" font-size="10" fill="#8fa3bb">syncToolkitToState · boundedElastic</text>
+  <line x1="256" y1="1154" x2="276" y2="1154" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <rect x="282" y="1128" width="206" height="52" rx="10" fill="#16233a" stroke="#2d415f"/>
+  <text x="296" y="1149" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">persistAgentStateCas<tspan fill="#8fa3bb" dx="6">:536</tspan></text>
+  <text x="296" y="1167" font-size="10" fill="#8fa3bb">CAS 冲突按 ConflictPolicy 处理</text>
+  <line x1="488" y1="1154" x2="508" y2="1154" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <rect x="514" y="1128" width="196" height="52" rx="10" fill="#16233a" stroke="#2d415f"/>
+  <text x="528" y="1149" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">notifyPostCall</text>
+  <text x="528" y="1167" font-size="10" fill="#8fa3bb">AgentBase:805 · PostCall Hook</text>
+  <line x1="710" y1="1154" x2="730" y2="1154" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <rect x="736" y="1128" width="188" height="52" rx="10" fill="#10231b" stroke="#2e6b50"/>
+  <text x="750" y="1149" font-size="11" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#4ade80">AgentResultEvent</text>
+  <text x="750" y="1167" font-size="10" fill="#8fa3bb">→ AgentEndEvent → 返回 Msg</text>
+  <text x="72" y="1200" font-size="10.5" fill="#f87171">⚠ 2.0.3：Redis/JDBC/MySQL/PostgreSQL 等 6 个后端上 OVERWRITE 先写入、再读回版本时抛异常（main #3048 已修）</text>
+  <text x="72" y="1220" font-size="10.5" fill="#fcd34d">⚠ 2.0.3：doCallInner 空完成时 flatMap 不执行 → 本轮输入不落盘，call() 返回空（main #3049 已补 switchIfEmpty）</text>
+
+  <rect x="56" y="1234" width="244" height="72" rx="10" fill="#16233a" stroke="#2d415f"/>
+  <text x="70" y="1255" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">saveStateAfterCallFailure<tspan fill="#8fa3bb" dx="6">:511</tspan></text>
+  <text x="70" y="1273" font-size="10" fill="#8fa3bb">出错：先存再抛原异常</text>
+  <text x="70" y="1290" font-size="10" fill="#8fa3bb">中断异常不在这里存，原样上抛</text>
+  <line x1="300" y1="1270" x2="324" y2="1270" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <rect x="330" y="1234" width="244" height="72" rx="10" fill="#16233a" stroke="#2d415f"/>
+  <text x="344" y="1255" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#6cb2ff">createErrorHandler<tspan fill="#8fa3bb" dx="6">AgentBase:495</tspan></text>
+  <text x="344" y="1273" font-size="10" fill="#8fa3bb">非中断 → notifyError (AgentBase:825) 抛出</text>
+  <text x="344" y="1290" font-size="10" fill="#8fa3bb">保存失败也落到这里（onErrorResume 下游）</text>
+  <line x1="574" y1="1270" x2="598" y2="1270" stroke="#5b7392" stroke-width="1.6" marker-end="url(#ah)"/>
+  <rect x="604" y="1234" width="320" height="72" rx="10" fill="#251316" stroke="#6e2f37"/>
+  <text x="618" y="1255" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#f87171">handleInterrupt<tspan fill="#8fa3bb" dx="6">:4041</tspan></text>
+  <text x="618" y="1273" font-size="10" fill="#8fa3bb">USER：补齐 pending 结果 + INTERRUPTED 回复 → 保存</text>
+  <text x="618" y="1290" font-size="10" fill="#8fa3bb">SYSTEM：原样保存 → AgentShuttingDownException</text>
 
   <!-- 一句话版 -->
-  <text x="56" y="1164" font-size="11" fill="#8fa3bb">一句话版：call → callInternal → buildAgentStream（onAgent 中间件 + 事件流）→ runLifecycle（串行闸门 + per-call 作用域）→ notifyPreCall</text>
-  <text x="56" y="1184" font-size="11" fill="#8fa3bb">→ doCallInner 分流 → reasoning ⇄ acting 循环直到 isFinished → saveStateToSession → notifyPostCall → 返回最终 Msg</text>
+  <text x="56" y="1352" font-size="11" fill="#8fa3bb">一句话版：call → callInternal → buildAgentStream（onAgent 中间件 + 事件流）→ runLifecycle（串行闸门）→ notifyPreCall → doCallInner 分流</text>
+  <text x="56" y="1372" font-size="11" fill="#8fa3bb">→ reasoning ⇄ acting 循环直到 isFinished / 暂停 / 叫停 / 轮次耗尽 → saveStateToSession（CAS）→ notifyPostCall → 返回最终 Msg；异常与中断走 ⑤ 下排</text>
 </svg>
