@@ -61,6 +61,18 @@ middlewares.sort(Comparator.comparingInt(MiddlewareBase::order).reversed());
 
 最后一行值得警惕：审计、脱敏这类"必须看到最终结果"的 middleware，如果被人随手写了个 `order() = 0`，就会跑到 `SandboxLifecycleMiddleware` 等内置层内侧，观察到的是加工之前的事件。
 
+从注册到真正执行，用一个具体例子走一遍（`A.order()=2`，`B`、`C` 取默认值 1，`D.order()=0`，注册顺序为 D、B、A、C）：
+
+```mermaid
+flowchart LR
+    REG["注册顺序<br/>D(0) · B(1) · A(2) · C(1)"] --> SORT["ReActAgent.Builder#build (:5327)<br/>按 order 稳定降序排序"]
+    SORT --> LIST["A(2) · B(1) · C(1) · D(0)<br/>同为 1 的 B、C 保持注册先后"]
+    LIST --> FOLD["MiddlewareChain#build (MiddlewareChain.java:46)<br/>for i = size-1 → 0：<br/>chain = input → mw_i.onX(input, next = chain)"]
+    FOLD --> RUN["A.onX( B.onX( C.onX( D.onX( core ) ) ) )<br/>A 最先拿到输入、最后看到输出"]
+```
+
+`build` 本身不排序，也不做去重：同一个 middleware 实例注册两次，就会在链上出现两层。它只负责按列表顺序折叠，排序只在 `ReActAgent.Builder#build` 里做一次。
+
 middleware 能做的事远超"前后打点"：输入是 record（可替换字段构造新输入传给 next），输出是 `Flux<AgentEvent>`（可用 Reactor 算子过滤/改写/追加事件），还可以**不调 next 直接短路**（硬拦截）或发出 `RequestStopEvent`（软停止，`GenerateReason.MIDDLEWARE_STOP_REQUESTED`）。
 
 **改写事件流 ≠ 改写会话历史**，差别取决于你挂在哪个切点。看 `reasoningStream`（`ReActAgent.java:2497`）怎么收尾：
@@ -78,8 +90,19 @@ return MiddlewareChain.build(middlewares, ..., MiddlewareBase::onModelCall, mode
 
 | 在哪个切点改写 `TextBlockDeltaEvent` | 推给消费端的文本 | 写进 `AgentState.context` 的助手消息 |
 |---|---|---|
-| `onModelCall` | 改写后 | **改写后**（被 `replaceAccumulatedText` 回灌） |
+| `onModelCall`（推理轮） | 改写后 | **改写后**（被 `replaceAccumulatedText` 回灌） |
 | `onReasoning` / `onAgent` | 改写后 | **原文**（累加器早在内层就定稿了） |
+
+而且不是每个切点"改写事件流"都有效。决定消费端能看到什么的，是 `publishEvent` 挂在链的里面还是外面：
+
+| 切点 | `publishEvent` 的位置 | middleware 改写或追加的事件，消费端能否看到 |
+|---|---|---|
+| `onAgent` | 链的核心就是 sink 本身 | 能 |
+| `onReasoning` | 链外：`reasoning` 里 `stream.doOnNext(this::publishEvent)`（`ReActAgent.java:2361`） | 能。源码注释写明，就是为了让 `onReasoning` 追加的事件（如 `InboxMiddleware` 的 `HintBlockEvent`）也能转发出去 |
+| `onModelCall` | 推理轮在外层 `onReasoning` 链外发布；总结轮在 `summaryStream` 的链外发布（`:3612`） | 能 |
+| `onActing` | **链内**：`actingStream` 自己就 `doOnNext(this::publishEvent)`（`:2888`），链外的 `acting` 只检查有没有 `RequestStopEvent` | **不能**。事件在进入你的 middleware 之前就已经推给消费端了，改写无效，追加的事件也会被丢掉。只有 `RequestStopEvent` 会被识别并生效 |
+
+最后一行是个容易踩的坑：想在 `onActing` 里给工具结果打标、脱敏或补充一个 `CustomEvent`，写完发现前端完全没变化。这类需求应该放到 `onAgent`，或者改工具本身的返回值（`ToolResultBlock.metadata` 会随工具结果事件一起带出，见 6.3）。main 分支截至本文核对时，这里的结构没有变化。
 
 这条回灌是 2.0.1 修的（#2469，此前 `onModelCall` 的改写连最终消息都进不去，原生结构化输出会读到陈旧文本）。落到实践上：**只想让用户看不到、但会话历史里要保留原文**（审计、客服质检回放）的脱敏，放 `onAgent`；**要求模型下一轮也看不到原文**的改写，必须放 `onModelCall`。
 
@@ -93,6 +116,22 @@ TextBlock{Start,Delta,End} → 属于当前 reply 且未见工具调用 → 进�
 ToolCallStartEvent    → toolCallSeen=true，缓冲整批丢弃（这轮是中间轮）
 ModelCallEndEvent     → 未见工具调用 → 先 flush 缓冲的文本事件，再放行 EndEvent
 ```
+
+同一逻辑的状态机（`FinalAnswerFilterMiddleware.RoundState`，`:67`；每次订阅新建一个实例，互不干扰）：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Buffering: ModelCallStartEvent<br/>记下 replyId，清空缓冲
+    Buffering --> Buffering: 本 reply 的 TextBlock 事件<br/>放进缓冲，不下发
+    Buffering --> Suppressing: 本 reply 的 ToolCallStartEvent<br/>toolCallSeen=true，丢弃缓冲
+    Suppressing --> Suppressing: 本 reply 的 TextBlock 事件<br/>直接丢弃
+    Buffering --> Idle: 本 reply 的 ModelCallEndEvent<br/>先下发缓冲文本，再下发 End
+    Suppressing --> Idle: 本 reply 的 ModelCallEndEvent<br/>只下发 End
+    Idle --> Idle: 其他事件（工具、思考、控制）<br/>原样放行
+```
+
+只有**属于当前 `replyId`** 的文本事件才会被缓冲或丢弃（`isCurrentReply`）。另外要知道，父 Agent 挂的这个 middleware **根本收不到子 Agent 的事件**：子 Agent 的事件经 emitter 直接写进父级的 sink，不经过父级的 `onReasoning` 链（见 6.3 的事件流图）。所以父 Agent 开了最终答案过滤，子 Agent 中间轮次的文本仍然会出现在流里；要过滤子 Agent 的文本，得在子 Agent 自己身上也挂一份。
 
 **代价是首字延迟**：一轮的文本必须等到 `ModelCallEndEvent` 才能判定"是不是最后一轮"，所以打字机效果在最终轮开头会有一次批量吐出。要极致流式就别开它，要"只给用户看结论"就开——这是显式的取舍，因此设计成 opt-in 而非默认。
 
@@ -154,6 +193,31 @@ return TracerRegistry.get()
 | 控制 | `EXCEED_MAX_ITERS`、`REQUIRE_USER_CONFIRM`、`USER_CONFIRM_RESULT`（2.0.1 起在 HITL 恢复时发出，与前一次的 `REQUIRE_USER_CONFIRM` 通过 `replyId` 配对）、`REQUIRE_EXTERNAL_EXECUTION`、`EXTERNAL_EXECUTION_RESULT`、`REQUEST_STOP`、`ALL_TOOLS_DENIED`、`SUBAGENT_EXPOSED`、`HINT_BLOCK`、`CUSTOM` | HITL、外部执行、停止信号 |
 
 **事件如何流动**：`event/AgentEventEmitter.java` 有两个 Reactor Context key——`CONTEXT_KEY`（本 agent 的 sink，`buildAgentStream` 里 `contextWrite` 注入）与 `FORWARDING_CONTEXT_KEY`（父 agent 注入的转发器，子 agent 事件打上 source 标记后推进父流——第 3 章提到的 `deferContextual` 保链细节就是为它服务）。块级 start/end 配对由 `ReActAgent` 内部类 `ModelCallBlockLifecycle` 维护，切换块类型时先 flush 前一块。
+
+事件从产生到被消费者拿到的完整路径（含 `agent_spawn` 子 Agent 转发）：
+
+```mermaid
+flowchart TB
+    SE["ReActAgent#streamEvents (:1113)"] --> BAS["ReActAgent#buildAgentStream (:1038)<br/>Flux.create(sink, OverflowStrategy.BUFFER)"]
+    BAS --> START["sink.next(AgentStartEvent)"]
+    BAS --> CW["runLifecycle(...).contextWrite：<br/>EVENT_SINK_KEY = sink<br/>AgentEventEmitter.CONTEXT_KEY = sink::next"]
+    CW --> DC["ReActAgent#doCall (:1195)<br/>Context 里有 FORWARDING_CONTEXT_KEY？"]
+    DC -->|"没有（自己是顶层）"| BIND1["scope.eventSink = sink"]
+    DC -->|"有（自己是子 Agent）"| BIND2["scope.externalEventEmitter =<br/>AgentEventEmitter#fromForwardingContext (:91)"]
+    BIND1 --> PUB["CallExecution#publishEvent (:2119)<br/>eventSink 优先，否则 externalEventEmitter"]
+    BIND2 --> PUB
+    PUB --> SINK["父级 Flux 的 sink"]
+    PUB -.->|"子 Agent 的事件"| TAG
+    SPAWN["AgentSpawnTool#execLocalSync (:768)<br/>AgentEventEmitter#fromContext (:77) 取父 emitter"] --> TAG["taggedEmitter：event.withSource(sourcePath)<br/>(AgentEvent.java:129)"]
+    TAG -->|"contextWrite(FORWARDING_CONTEXT_KEY)"| CHILD["DefaultAgentManager#invokeAgent (:179)<br/>子 Agent 的 doCall 走右侧分支"]
+    TAG --> SINK
+    BAS --> DONE["生命周期结束：<br/>有终态 Msg → AgentResultEvent<br/>doFinally → AgentEndEvent + complete"]
+    SINK --> MW["onAgent 洋葱链"] --> CONSUMER["消费者订阅的 Flux&lt;AgentEvent&gt;"]
+```
+
+这张图解释了三个现象。**`call()` 可能返回空**：`AgentResultEvent` 只在生命周期发出终态 `Msg` 时才产生，`call()` 从事件流里过滤这个事件，拿不到就返回空 `Mono`（第 3 章 3.6 的空结果出口）。**消费慢会占内存**：`Flux.create` 用的是 `BUFFER` 策略，消费者跟不上时事件在内存里无上限堆积，SSE 客户端网络差的时候要留意。**不要在工具方法里 `block()` 子 Agent 调用**：`AgentSpawnTool` 的 javadoc 专门提醒过，`block()` 会另起一个订阅，拿不到父级 Context 里的 emitter，子 Agent 的事件就断在这里，转发不到父级流。
+
+还有一条对选切点影响很大：**父 Agent 自己的事件和子 Agent 的事件，进入 sink 的位置不同**。父 Agent 推理阶段的事件先流过 `onReasoning` 链，再由 `doOnNext(this::publishEvent)`（`ReActAgent.java:2361`）写入 sink；子 Agent 的事件则由 `taggedEmitter` 直接写入 sink。结果是，父级的 `onReasoning`、`onActing`、`onModelCall` 都**看不到子 Agent 的事件**，只有 `onAgent` 能同时看到两者。审计、脱敏这类必须覆盖全部输出的 middleware，挂在 `onAgent` 才完整。
 
 消费入口就是 `agent.streamEvents(msgs, ctx)`：拿到 `Flux<AgentEvent>` 后按需 filter——要打字机就取 `TextBlockDeltaEvent`，要全景可视化就全量映射。
 
