@@ -38,7 +38,50 @@ flowchart TB
 
 **洋葱链构建**：`middleware/MiddlewareChain.java` 的 `build(middlewares, agent, ctx, MiddlewareBase::onXxx, core)` **从后往前**折叠——列表第一个元素是最外层。第 3 章已看到四处调用点：`buildAgentStream`（onAgent）、`reasoning`（onReasoning）、`reasoningStream`（onModelCall）、`acting`（onActing）。
 
+**但"列表"不等于"注册顺序"**。2.0.1 起 `MiddlewareBase` 多了一个默认方法：
+
+```java
+default int order() { return 1; }   // 数值越大越靠外
+```
+
+`ReActAgent.Builder#build` 在把框架自带的 middleware（如 `TaskReminderMiddleware`、`DynamicSkillMiddleware`）追加进列表之后，做一次排序（`ReActAgent.java:5327`）：
+
+```java
+// List.sort is stable: middlewares with equal order retain their registration order.
+middlewares.sort(Comparator.comparingInt(MiddlewareBase::order).reversed());
+```
+
+所以真实规则是两级：**先按 `order()` 降序，同 order 再按注册顺序**。框架内置的 middleware（core 与 harness 两侧）目前**没有一个覆写 `order()`**，全员都是 1——这就是"注册顺序即洋葱层次"在默认情况下仍然成立的原因，也是它会在你不经意时失效的原因：
+
+| 你的 middleware | 实际位置 |
+|---|---|
+| 不覆写 `order()`（=1） | 按注册顺序排，先注册的在外 |
+| `order()` 返回 2 及以上 | 排到**所有**默认 middleware 外面，无论注册早晚 |
+| `order()` 返回 0 或负数 | 排到**所有**默认 middleware 里面——包括第 7 章 Harness 装配的沙箱、压缩等全部内置层 |
+
+最后一行值得警惕：审计、脱敏这类"必须看到最终结果"的 middleware，如果被人随手写了个 `order() = 0`，就会跑到 `SandboxLifecycleMiddleware` 等内置层内侧，观察到的是加工之前的事件。
+
 middleware 能做的事远超"前后打点"：输入是 record（可替换字段构造新输入传给 next），输出是 `Flux<AgentEvent>`（可用 Reactor 算子过滤/改写/追加事件），还可以**不调 next 直接短路**（硬拦截）或发出 `RequestStopEvent`（软停止，`GenerateReason.MIDDLEWARE_STOP_REQUESTED`）。
+
+**改写事件流 ≠ 改写会话历史**，差别取决于你挂在哪个切点。看 `reasoningStream`（`ReActAgent.java:2497`）怎么收尾：
+
+```java
+return MiddlewareChain.build(middlewares, ..., MiddlewareBase::onModelCall, modelCallCore)
+        .apply(new ModelCallInput(...))
+        .doOnNext(event -> {                       // 收集的是经过 onModelCall 链之后的 delta
+            if (event instanceof TextBlockDeltaEvent textDelta) { transformedText.append(...); }
+        })
+        .doOnTerminate(() -> context.replaceAccumulatedText(transformedText.toString()));
+```
+
+`reasoningStream` 整体又被包在 `onReasoning` 链里（`:2339` 的 `reasoningCore`），`buildFinalMessage()` 在链结束后才调（`:2394`）。于是：
+
+| 在哪个切点改写 `TextBlockDeltaEvent` | 推给消费端的文本 | 写进 `AgentState.context` 的助手消息 |
+|---|---|---|
+| `onModelCall` | 改写后 | **改写后**（被 `replaceAccumulatedText` 回灌） |
+| `onReasoning` / `onAgent` | 改写后 | **原文**（累加器早在内层就定稿了） |
+
+这条回灌是 2.0.1 修的（#2469，此前 `onModelCall` 的改写连最终消息都进不去，原生结构化输出会读到陈旧文本）。落到实践上：**只想让用户看不到、但会话历史里要保留原文**（审计、客服质检回放）的脱敏，放 `onAgent`；**要求模型下一轮也看不到原文**的改写，必须放 `onModelCall`。
 
 内置实现：`middleware/TaskReminderMiddleware`（配合 `TodoTools`，每轮推理前把 `AgentState.tasksContext` 渲染成 system-reminder 注入）、`middleware/FinalAnswerFilterMiddleware`（见下）、`tracing/OtelTracingMiddleware`（onAgent/onModelCall/onActing 产出 `invoke_agent` / `chat` / `execute_tool` 嵌套 span，无 OTel SDK 时短路近零开销）、`shutdown/GracefulShutdownMiddleware`、`skill/DynamicSkillMiddleware`。
 
@@ -71,7 +114,7 @@ ModelCallEndEvent     → 未见工具调用 → 先 flush 缓冲的文本事件
 |---|---|---|
 | 形态 | 事件回调，返回可能被改过的事件对象 | 洋葱包裹，持有 next 函数 |
 | 能否包裹前后 | 不能（Pre/Post 是两次独立回调） | 能，next 前后自由插逻辑、可改写事件流 |
-| 排序 | `priority()` 数值 | 列表顺序，第一个最外层 |
+| 排序 | `priority()` 数值，越小越先 | `order()` 数值，**越大越外**（默认 1）；同值按注册顺序 |
 | 粒度 | 12 个细粒度点（含 chunk 级） | 5 个粗粒度点（chunk 级改为订阅事件流） |
 | 执行位置 | 循环内部离散时点 | 包在 reasoning/acting/modelCall 流外面 |
 
@@ -108,7 +151,7 @@ return TracerRegistry.get()
 | 模型调用 | `MODEL_CALL_START` / `MODEL_CALL_END`（带 `ChatUsage`） | token 计量 |
 | 内容块 | `TEXT_BLOCK_{START,DELTA,END}`、`THINKING_BLOCK_*`、`DATA_BLOCK_*` | 打字机流式渲染、思考过程展示 |
 | 工具 | `TOOL_CALL_{START,DELTA,END}`、`TOOL_RESULT_{START,TEXT_DELTA,DATA_DELTA,END}` | 工具调用可视化；四个 `TOOL_RESULT_*` 事件都会把 `ToolResultBlock.metadata` 原样带出（`runToolBatch` 里逐个 copy），业务可借此把工具侧的结构化信息透到前端而不必塞进文本 |
-| 控制 | `EXCEED_MAX_ITERS`、`REQUIRE_USER_CONFIRM`、`USER_CONFIRM_RESULT`、`REQUIRE_EXTERNAL_EXECUTION`、`EXTERNAL_EXECUTION_RESULT`、`REQUEST_STOP`、`ALL_TOOLS_DENIED`、`SUBAGENT_EXPOSED`、`HINT_BLOCK`、`CUSTOM` | HITL、外部执行、停止信号 |
+| 控制 | `EXCEED_MAX_ITERS`、`REQUIRE_USER_CONFIRM`、`USER_CONFIRM_RESULT`（2.0.1 起在 HITL 恢复时发出，与前一次的 `REQUIRE_USER_CONFIRM` 通过 `replyId` 配对）、`REQUIRE_EXTERNAL_EXECUTION`、`EXTERNAL_EXECUTION_RESULT`、`REQUEST_STOP`、`ALL_TOOLS_DENIED`、`SUBAGENT_EXPOSED`、`HINT_BLOCK`、`CUSTOM` | HITL、外部执行、停止信号 |
 
 **事件如何流动**：`event/AgentEventEmitter.java` 有两个 Reactor Context key——`CONTEXT_KEY`（本 agent 的 sink，`buildAgentStream` 里 `contextWrite` 注入）与 `FORWARDING_CONTEXT_KEY`（父 agent 注入的转发器，子 agent 事件打上 source 标记后推进父流——第 3 章提到的 `deferContextual` 保链细节就是为它服务）。块级 start/end 配对由 `ReActAgent` 内部类 `ModelCallBlockLifecycle` 维护，切换块类型时先 flush 前一块。
 
