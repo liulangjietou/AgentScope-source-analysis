@@ -1,144 +1,116 @@
 # 第 7 章 Harness 工程化外壳（核心）
 
-> 路径前缀：`agentscope-harness/src/main/java/io/agentscope/harness/`
-> 源码基线：agentscope-java main `a3798a8f`（2026-10-03，2.0.4-SNAPSHOT 未发版）；行号均按此提交。标“main”的内容不在 v2.0.3 里。
-> 裸 ReAct 只解决"一轮任务"；跑数小时、累积状态、需要文件系统与子 Agent 的长任务，靠 Harness。本章讲 `HarnessAgent` 如何在**不改 ReAct 算法一行**的前提下叠加这些能力。
+> 路径前缀：`agentscope-harness/src/main/java/io/agentscope/harness/agent/`。
+> 唯一框架基线：agentscope-java main `dcb131a3f257f06e2b7ddcd3dacfe75d31d04028`（2026-10-26 核对）。本章按真实类名与方法定位，不沿用旧快照行号；源码版本为 `2.1.0-SNAPSHOT`，不据此推断发布状态。
+> Harness 组合 core 的推理循环，并承担工作区、会话日志、上下文预算、子 Agent 与沙箱装配。customer_work 示例单独保留 `17007e4a` / 2.0.3 历史边界。
 
 ## 7.1 组合而非继承：HarnessAgent 的结构
 
-`agent/HarnessAgent.java`（2984 行）**implements `Agent, AutoCloseable`，内部组合一个 `ReActAgent delegate`**（`:173`）。8 个 `call` 重载都经 `wrappedCall`（`:955`），`streamEvents` 重载经 `wrappedStreamEvents`：
+`HarnessAgent implements Agent, AutoCloseable`，内部持有 `ReActAgent delegate`。普通 `call` 和 `streamEvents` 分别通过 `wrappedCall` 与 `wrappedStreamEvents` 管理沙箱租约；`prepareRun` / `prepareCall` 创建可取消的单次运行句柄。没有传 sessionId 时，`ensureSessionDefaults` 仍以 Agent 名字补齐，并补沙箱、文件系统等运行上下文。
 
 ```mermaid
 flowchart TB
-    HC["HarnessAgent#call（8 个重载）"] --> ESD["HarnessAgent#ensureSessionDefaults (:1027)<br/>没给 sessionId 就用 Agent 名字；补沙箱上下文、文件系统、工作区管理器"]
-    ESD --> WC["HarnessAgent#wrappedCall (:955)<br/>Mono.using：获取 → 调用 → 释放"]
-    WC --> ACQ["SandboxLifecycleMiddleware#acquireForCall<br/>获取沙箱租约"]
-    ACQ --> DEL["ReActAgent#call<br/>进入第 3 章的完整循环<br/>（Harness 能力已作为 middleware/tool 注入其中）"]
-    DEL --> REL["SandboxLifecycleMiddleware#releaseForCall<br/>释放租约"]
-    DEL -.->|"上下文溢出错误（只在 call 路径）"| REC["HarnessAgent#recoverFromOverflow (:1059)<br/>强制压缩后重试一次"]
+    API["HarnessAgent#call / streamEvents"] --> CTX["ensureSessionDefaults"]
+    CTX --> WRAP["wrappedCall / wrappedStreamEvents<br/>using 获取与释放沙箱租约"]
+    WRAP --> CORE["ReActAgent#call / streamEvents<br/>core 会话执行与推理循环"]
+    CORE --> PREP["HarnessContextBuilder#prepare<br/>最终模型请求上下文与预算检查"]
+    PREP --> MODEL["Model 请求"]
+    MODEL -.->|"原生事件日志模式：模型上下文溢出"| REC["CompactionMiddleware#overflowRecovery<br/>同一 execution 内强制压缩后重试"]
 ```
 
-两点容易忽略：
+**溢出恢复已经分成两条路径**：默认事件日志模式把恢复挂在 `onReasoning`，因此 `call` 与 `streamEvents` 都能覆盖，并保留同一 turn、execution 与日志 writer。中断、`SessionLogException` 不进入这条恢复分支。显式 legacy 模式才使用 `wrappedCall` 的 `onErrorResume`：压缩后通过 `updateAgentState` 持久化，输入已经在历史中时用空输入重试，避免用户消息重复。legacy 的 `wrappedStreamEvents` 没有对应外层恢复。
 
-- **溢出兜底只挂在 `call` 路径上**。`wrappedCall` 在配置了压缩时追加 `onErrorResume`，用 `isContextOverflowError`（`:1116`）按错误消息里的 7 个关键词（`context_length_exceeded`、`context length`、`maximum context`、`token limit`、`too many tokens`、`exceeds the model's maximum`、`reduce the length`）判定溢出，命中就用 `triggerMessages(1)` 的配置强制压缩一次再重试；`wrappedStreamEvents` 没有这层，流式调用溢出会直接报错。
-- **默认 sessionId 是 Agent 的名字**。调用方不传 sessionId 时，同一个 HarnessAgent 的所有匿名调用落到同一个会话里。
+这些是组合关系：工作区和技能中间件、工具与最终模型请求准备器共同装配进 core；图中没有把它们画成 core 必然逐个调用的业务工具。
 
-官方架构文档（`docs/v2/en/docs/harness/architecture.md`）的三条核心原则，读 Harness 源码前先记住：
+## 7.2 Builder 装配：中间件与最终请求准备器
 
-1. **能力叠加在推理循环之上，而非嵌入其中**——workspace 注入、压缩、子 Agent、沙箱、Plan Mode 各自挂在循环的关键时刻（以 Middleware/Tool 形式），核心算法零改动；
-2. **能力之间互不依赖，只共享三个对象**——`RuntimeContext`（本次调用是谁）、workspace（读写哪些文件）、`AgentStateStore`（如何恢复）；
-3. **内置 middleware 顺序固定，用户 middleware 永远排在最前面（最外层）。** 这条在源码层面有个前提：用户 middleware 经 `Builder#middleware(...)` 在调用时就直接注册进内层 `ReActAgent.Builder`（`Builder#middleware`，`:1613`），早于 `build()` 注入的全部内置层，所以同为默认 `order()=1` 时才排在最外。一旦你的 middleware 覆写了 `order()` 并返回 0 或负数，它会被排序到所有内置层**里面**（排序规则见第 6 章 6.1）。
+`HarnessAgent.Builder#build` 的注册顺序如下，具体项受能力开关约束；core 最后按 `MiddlewareBase#order()` 稳定降序排序。同为默认 order 时用户中间件先注册、位于外层；自定义 order 可以改变这个层次，不能说用户永远最外。
 
-## 7.2 Builder 装配：内置 Middleware 的固定顺序
-
-`HarnessAgent.Builder#build`（`:2369` 起，约 600 行）向内部 `ReActAgent.Builder` 按固定顺序注入内置 middleware（列表顺序 = 洋葱层次，第 6 章）：
-
-```
-用户 middleware（最外层）
-→ SandboxLifecycleMiddleware (:2533) → AgentTraceMiddleware (:2536)
-→ WorkspaceContextMiddleware (:2551) → AtPathExpansionMiddleware (:2554)
-→ TranscriptMiddleware (:2571)
-→ MemoryFlushMiddleware (:2583) → MemoryMaintenanceMiddleware (:2603)
-→ CompactionMiddleware (:2620) → ToolResultEvictionMiddleware (:2624)
-→ InboxMiddleware (:2628) → TeamsMiddleware (:2638)
-→ DynamicSubagentsMiddleware/SubagentsMiddleware (:2656/:2670)
-→ AsyncToolMiddleware (:2680) → PlanModeMiddleware (:2760)
-→ SkillUsageMiddleware (:2840)/SkillCuratorMiddleware (:2867) → HarnessSkillMiddleware (:2930)
+```text
+用户 middleware
+→ ContextConventionsMiddleware
+→ SandboxLifecycleMiddleware → AgentTraceMiddleware
+→ WorkspaceContextMiddleware → AtPathExpansionMiddleware
+→ MemoryFlushMiddleware → MemoryMaintenanceMiddleware
+→ CompactionMiddleware#overflowRecovery 返回的中间件
+→ InboxMiddleware → TeamsMiddleware
+→ DynamicSubagentsMiddleware / SubagentsMiddleware
+→ AsyncToolMiddleware → PlanModeMiddleware
+→ SkillUsageMiddleware → SkillCuratorMiddleware → HarnessSkillMiddleware
 ```
 
-最多 17 层（两种子 Agent 中间件二选一）。排第一的 `SandboxLifecycleMiddleware` 在 main 上 `activePoints()` 返回空集合（第 6 章 6.1），一个切点都不参加：沙箱的获取和释放由 `wrappedCall` 用 `Mono.using` 显式驱动，它只是挂在列表里方便统一管理。其余内置层也都在 main 上声明了 `activePoints()`。
+`SandboxLifecycleMiddleware` 不靠切点获取租约，租约由外层 using 包装驱动。**普通压缩与工具结果驱逐不再作为这张中间件表里的独立层注册**：`build` 把 `CompactionMiddleware`、`ToolResultEvictionMiddleware` 交给 `HarnessContextBuilder`，通过 `inner.modelRequestPreparer(...)` 放到最终模型请求边界。
 
-每一项都由对应的 builder 开关决定是否注入，所以实际链长取决于你开了哪些能力；但**相对顺序是硬编码在 `build()` 里的**，不可调。读这段代码时按行号顺着往下扫一遍，就得到了当前版本的完整洋葱层次——这比记表格可靠，因为新能力总是插进来。
+当前默认 `SessionHistoryMode.EVENT_LOG`。未设置 `sessionLogStore` 时，使用 `WorkspaceSessionLogStore`；原生会话从 journal 恢复，**不会隐式导入 `.stateStore(...)` 的旧状态**。`legacySessionHistory(true)` / `sessionHistoryMode(LEGACY)` 才启用旧 StateStore 历史路径。legacy 或沙箱基础设施元数据确实需要 StateStore 时，未显式配置才回退 `JsonFileAgentStateStore(defaultStateDir(agentId))`，路径为 `~/.agentscope/state/<agentId>/`，可由 `agentscope.state.home` 改根目录。不能再把这个路径称为所有 Harness 对话的默认历史后端。
 
-另一入口 `HarnessAgent.Builder.fromAgent(existingReActAgent)`（`:1440`）可把现成 ReActAgent 包成 HarnessAgent（customer_work 的渠道接入就这么用，见 7.6）。它复制的是“看得见的配置”：名字、描述、系统提示词、模型、最大轮数、生成参数、工具箱（`copy()` 一份）、状态存储与默认会话、模型重试与备用模型（含 main 的 `FailoverListener`）、执行配置、权限上下文（同一实例）、中间件和 Hook。中间件会过滤掉 `HarnessRuntimeMiddleware` 和 `GracefulShutdownMiddleware`（`filterCopyableMiddlewares`，`:1630`），避免内置层装两遍。工作区、文件系统、子 Agent、技能治理、Plan Mode、压缩这些 Harness 独有的配置一项都不复制，要在返回的 builder 上自己配。
-
-还有一个默认值容易踩：**不配 `stateStore` 时，HarnessAgent 默认用 `JsonFileAgentStateStore`，落在 `~/.agentscope/state/<agentId>/`**（`defaultStateDir`，`:1147`），而不是 ReActAgent 的内存实现；系统属性 `agentscope.state.home` 可以改根目录。配了 `RemoteFilesystemSpec`（多副本部署用）却还是本地状态存储时，`build()` 直接抛 `IllegalStateException`（`:2445`），不让每个节点各存一份状态。
-
-> **main 已变更（未发版）**：`ReActAgent` 新增的 `prepareRun` / `prepareCall`（第 3 章 AgentRun，#3279）在 `HarnessAgent` 上也转发了（`:851` / `:863`），返回的可取消句柄覆盖完整的 Harness 与沙箱生命周期。
+`fromAgent(existingReActAgent)` 复制公开可读的 core 配置，也会保留可识别的 Harness 上下文策略与来源；过滤 `HarnessRuntimeMiddleware`、`GracefulShutdownMiddleware` 以免装两遍。工作区、文件系统、沙箱、技能治理等仍需在返回的 builder 上明确配置。迁移历史应用时应先选择会话模式，再确定状态后端，而不是只复制旧 Builder 链。
 
 ## 7.3 能力子包地图
 
 ```mermaid
 flowchart TB
-    HA["HarnessAgent（组合 ReActAgent delegate）"]
-    HA --> WS["workspace/<br/>WorkspaceManager / PathPolicy<br/>工作区目录布局与路径规范化"]
-    HA --> FS["filesystem/<br/>LocalFilesystem / RemoteFilesystem / SandboxBackedFilesystem<br/>OverlayFilesystem 可插拔文件系统"]
-    HA --> SB["sandbox/<br/>SandboxManager / SandboxLease / DockerSandbox<br/>租约 + 快照恢复 + 执行守卫"]
-    HA --> MEM["memory/<br/>MemoryConsolidator / compaction.ConversationCompactor<br/>三层记忆与上下文压缩"]
-    HA --> SUB["subagent/<br/>SubagentFactory / task.TaskRepository<br/>Markdown 声明子 Agent，同步/后台执行"]
-    HA --> SK["skill/<br/>runtime.SkillRuntime / curator.SkillCurator<br/>技能自演化闭环"]
-    HA --> BUS["bus/<br/>MessageBus / WorkspaceMessageBus<br/>队列/回放日志/广播 三种消费模式"]
-    HA --> GW["gateway/<br/>HarnessGateway / SessionTurnGate / channel.Channel<br/>多渠道消息入口与会话互斥"]
-    HA --> TOOLS["tool(s)/<br/>FilesystemTool / ShellExecuteTool / AgentSpawnTool<br/>TaskTool / PlanModeTools / SkillManageTool ..."]
+    HA["HarnessAgent：组合与装配"]
+    HA --> CT["context/<br/>HarnessContextBuilder / ContextPolicy<br/>来源选择、渲染、预算与 manifest"]
+    HA --> SE["session/<br/>AgentSession / WorkspaceSessionLogStore<br/>交互命令门面与原子存储适配"]
+    SE --> CS["core/session/<br/>SessionLog / SessionProjection / SessionRecovery<br/>日志、投影、恢复"]
+    HA --> WS["workspace/ + filesystem/<br/>WorkspaceManager / AbstractFilesystem"]
+    HA --> SB["sandbox/<br/>SandboxManager / SandboxLease"]
+    HA --> MEM["memory/compaction/<br/>ConversationCompactor / CompactionConfig"]
+    HA --> SUB["subagent/ + bus/ + team/<br/>同步与后台协作"]
+    HA --> SK["skill/<br/>运行、统计、审核与晋升"]
+    HA --> OV["observation/ + verification/<br/>动作证据与显式确定性验证"]
+    HA --> GW["gateway/ + tool/<br/>多渠道入口与模型工具"]
 ```
 
-各子包一句话 + 关键类：
+| 子包 | 实际职责与关键类 |
+|---|---|
+| `context` | `HarnessContextBuilder` 实现 core `ModelRequestPreparer`；`ContextSources`、`ContextSelectionPolicy`、`ContextRenderer`、`ContextManifest` 描述来源、选择、渲染与预算结果。`ContextPolicy` 的 0 限制由实际模型窗口决定，不是固定分层配额 |
+| `session` | `AgentSession` 提供 `submit/resume/respond/steer/inject/interrupt/await`，调用者可读取 transcript、pending 与投影；`WorkspaceSessionLogStore` 选择工作区对应的存储适配 |
+| `session` 存储 | `LocalSessionStorage` 在 POSIX 上组合进程内锁、OS 文件锁、强制写入与原子替换；Windows 走 `SqliteSessionStorage` 同步事务；`StoreSessionStorage` 适配远端存储。这不是旧 transcript JSONL 原地追加机制 |
+| `workspace` / `filesystem` | `WorkspaceManager`、`PathPolicy` 与本地/远端/沙箱文件系统。远端或沙箱业务 IO 应使用抽象，不能绕过它直接读宿主 `Files` |
+| `sandbox` | `SandboxManager`、`SandboxLease`、执行守卫与快照；隔离范围 SESSION/USER/AGENT/GLOBAL 决定资源共享边界 |
+| `memory` | 每日记忆、`MEMORY.md` 合并和 `ConversationCompactor` 压缩工作上下文；原始会话记录归 core journal 管理 |
+| `subagent` / `bus` / `team` | 声明式子 Agent、`TaskRepository` 后台任务、信箱及团队任务板；后台结果在后续推理中注入提醒 |
+| `skill` | `SkillRuntime`、`SkillCurator`、安全扫描与晋升门；治理策略由宿主配置 |
+| `observation` / `verification` | legacy 由 `StateStoreActionObserver` 存动作证据，原生模式从日志取证；`VerificationService` 仅验证已持久化证据，不重执行动作，也不注册成模型工具 |
+| `gateway` / `tool` | `HarnessGateway` 的渠道路由与会话互斥；文件、shell、子 Agent、任务、产物交付等工具 |
 
-| 子包 | 关键类 | 要点 |
-|---|---|---|
-| `workspace` | `WorkspaceManager`、`WorkspaceIndex`、`PathPolicy`、`plan/PlanModeManager` | 工作区是所有能力的物理基座；沙箱/远端模式下**必须走它而非 `java.nio.Files`** |
-| `filesystem` | `local/LocalFilesystem(WithShell)`、`remote/RemoteFilesystem`、`sandbox/SandboxBackedFilesystem`、`OverlayFilesystem`、`spec/{Local,Remote,Sandbox}FilesystemSpec` | 同一套读写/grep/glob 抽象，物理落点（本地/远端/沙箱）是配置选择 |
-| `sandbox` | `SandboxManager`、`SandboxLease`、`SandboxIsolationKey`、`SandboxExecutionGuard`、`snapshot/*`、`impl/docker/DockerSandbox*` | 租约式生命周期；快照支持跨进程恢复；`IsolationScope`（SESSION/USER/AGENT/GLOBAL）决定隔离粒度 |
-| `memory` | `MemoryConfig`、`MemoryConsolidator`、`compaction/{ConversationCompactor,CompactionConfig,ToolResultEvictionConfig}`、`session/SessionTree` | 三层：上下文 → 每日 `memory/YYYY-MM-DD.md` → 节流后台任务合并进 `MEMORY.md`；压缩是**结构化**的（保留目标/状态/发现/下一步），超大工具结果落盘驱逐 |
-| `subagent` | `SubagentDeclaration`、`SubagentFactory`、`AgentSpecLoader`、`task/{BackgroundTask,TaskRepository,WorkspaceTaskRepository,TaskStatus}` | Markdown 声明子 Agent；`agent_spawn` 工具触发；后台任务结果经 system-reminder 推回主 Agent，无需轮询 |
-| `skill` | `WorkspaceSkillRepository`、`runtime/{SkillRuntime,SkillLoadTool}`、`curator/{SkillCurator,SkillPromoter,SkillSecurityScanner,SkillPromotionGate}` | 自演化闭环：使用统计 → 提案 → 安全扫描 → 审批门 → 晋升为 `workspace/skills/` 下的 Markdown |
-| `bus` | `MessageBus`、`WorkspaceMessageBus`、`AsyncToolRegistry` | 三种消费模式：排空队列（单消费者）/ 回放日志（多消费者各自游标）/ 瞬时广播；key 约定如 `agentscope:inbox:<sessionId>` |
-| `gateway` | `HarnessGateway`、`MsgContext`、`SessionTurnGate`、`SubagentRegistry`、`channel/{Channel,ChannelRouter,InboundMessage,OutboundAddress}` | 渠道消息 → `MsgContext#canonicalKey` 稳定映射 sessionId → `SessionTurnGate` 每会话公平互斥 → 路由到注册的 `HarnessAgent#call`；`lastRouteBySession` 支持主动推送 |
-| `transcript` | `TranscriptStore`、`FilesystemTranscriptStore`、`ObjectStoreTranscriptStore`、`TranscriptRef` | 会话逐事件归档，与 KV 型 `BaseStore` 正交。写入是**不可变分段**（`{tenant}/{agentId}/{sessionId}/events/{seqStart}-{seqEnd}-{writerId}.jsonl`）而非就地追加，多写者不会互相覆盖 |
-| `team` | `TeamClient`、`LocalTeamClient`、`TeamContext`、`TeamCreateSpec`、`TeamMemberSpec`、`TeamConflictException` | 多 Agent 协作的任务板 + 信箱模型；`LocalTeamClient` 走 `BaseStore` 的 CAS，另有控制面 HTTP 实现。对应 `TeamsMiddleware` 与 `TeamTool` |
-| `coordination` | `PeriodicGate`、`LocalPeriodicGate`、`StoreBackedPeriodicGate` | 周期性后台工作的**最小间隔闸门**：`tryClaim()` 返回 true 才准跑。7.3 末尾"压缩/记忆蒸馏有节流"就是靠它；`StoreBackedPeriodicGate` 让节流跨节点生效，多副本部署下不会每个副本各跑一遍蒸馏 |
-| `artifact` | `ArtifactDeliveryTarget`、`ArtifactDeliveryRequest`、`ArtifactDeliveryResult` | 产物出境的传输抽象，配合 `deliver_artifact` 工具（见 7.4） |
-| `tool`/`tools` | `FilesystemTool`、`ShellExecuteTool`、`TaskTool`、`AgentSpawnTool`、`ArtifactDeliveryTool`、`MemorySaveTool` 等、`ToolsConfig`（`workspace/tools.json` 声明 MCP 与过滤） | Harness 的能力以内置工具形式暴露给模型 |
-
-**状态三层**（官方文档口径，与第 2 章衔接）：in-call（`AgentState` + `RuntimeContext`）→ cross-call（每次 call 结束自动存/下次自动读，另有永不压缩的全量会话日志 `sessions/<sessionId>.log.jsonl`）→ long-term（`MEMORY.md` 蒸馏，每步推理注入 system prompt）。三条不变式：**system prompt 每次调用重建**（改 `AGENTS.md`/`MEMORY.md` 不用重启，下一次调用生效。官方文档写的是“每一步推理都重建”，但源码里拼这些内容的 `WorkspaceContextMiddleware` 只参加 `ON_SYSTEM_PROMPT`，系统提示词在每次调用开头的 `notifyPreCall` 里经 `seedSystemMsg` 生成一次，同一次调用后面几轮推理沿用这一份）；压缩/记忆蒸馏有节流（不是每轮都跑）；持久化统一由 core 的 `ReActAgent` + `AgentStateStore` 负责，Harness 不再自带持久化钩子。
+旧 `memory/session/SessionTree`、`SessionTranscriptWriter`、`TranscriptMiddleware` 与 `transcript/*` 已从当前源码删除；不要沿旧目录寻找恢复与查询入口。长期记忆与会话 journal 也不是同一后端：修改 `MEMORY.md` 不等于改写已经提交的会话事实。
 
 ### 两条核心链路：agent_spawn 与上下文压缩
 
-**`agent_spawn`**（`tool/AgentSpawnTool.java`）是子 Agent 能力的入口。模型的一次调用会按"有没有任务、超时设多少、是不是远程"分流到四条执行路径：
+```mermaid
+flowchart TB
+    SP["AgentSpawnTool#agentSpawn"] --> DEP{"下一层深度超过 3？"}
+    DEP -->|"是"| ERR["返回深度错误"]
+    DEP -->|"否"| CREATE["DefaultAgentManager#createAgentIfPresent<br/>创建子 Agent，传播计划模式与父 DENY"]
+    CREATE --> TASK{"有 task？"}
+    TASK -->|"否"| ACCEPT["只建立会话，后续 agent_send"]
+    TASK -->|"是"| TIME{"有效 timeout"}
+    TIME -->|"0"| BG["TaskRepository 后台执行，返回 task_id"]
+    TIME -->|"正数"| SYNC["本地同步或远端协议调用"]
+    SYNC -->|"超时且 forceSync"| STOP["中断并返回 timeout"]
+    SYNC -->|"超时且允许提升"| PROMOTE["保留进行中的任务，提升为后台"]
+```
+
+同步本地子 Agent 通过 Reactor Context 向父事件流转发事件；纯后台任务独立执行，不能假设它拥有父流 emitter。结果由后台任务与信箱路径交付。工具结果还包含执行状态，宿主不能把 accepted 或后台 task_id 当成任务成功。
 
 ```mermaid
 flowchart TB
-    SP["AgentSpawnTool#agentSpawn (:301)"] --> DEP{"嵌套深度 > MAX_SPAWN_DEPTH（3）？"}
-    DEP -->|"是"| E1["Error: Maximum spawn depth exceeded"]
-    DEP -->|"否"| CR["DefaultAgentManager#createAgentIfPresent (:107)<br/>按 agent_id 取声明式 / 自定义工厂子 Agent"]
-    CR --> PREP["persistSpawnEntry (:1053) 登记会话<br/>propagatePlanMode (:739) 父在 Plan Mode 则子只读<br/>propagateParentDenyRules (:1713) 下发 DENY"]
-    PREP --> TASK{"带 task？"}
-    TASK -->|"否"| ACC["status: accepted<br/>只建会话，等后续 agent_send"]
-    TASK -->|"是"| TO{"resolveEffectiveTimeoutMs (:1531)"}
-    TO -->|"0：纯后台"| BG["TaskRepository#putTask<br/>本地：LocalTaskRunSpec 内 invokeAgent(...).block()<br/>远程：RemoteTaskRunSpec<br/>立即返回 task_id"]
-    TO -->|"> 0 且远程"| RS["runRemoteSyncReactive (:1292)<br/>经 agent-protocol 调远端（第 8 章）"]
-    TO -->|"> 0 且本地"| TP["execWithTimeoutPromotion (:881)<br/>execLocalSync 与超时赛跑"]
-    TP --> LS["execLocalSync (:768)<br/>注入 FORWARDING_CONTEXT_KEY<br/>子 Agent 事件转发进父流（第 6 章 6.3）"]
-    TP -->|"超时 + forceSync"| INT["interruptAgent (:985)<br/>返回 status: timeout"]
-    TP -->|"超时，未强制同步"| PRO["转为后台任务继续跑，不丢弃已进行的工作"]
-    ACC --> EXP["withSubagentExposedEvent (:1575)<br/>按需发 SubagentExposedEvent"]
-    BG --> EXP
-    RS --> EXP
-    LS --> EXP
+    FINAL["HarnessContextBuilder#prepare<br/>取得最终消息、工具 schema 与实际模型"] --> SEL["来源选择与上下文渲染"]
+    SEL --> EVICT["ToolResultEvictionMiddleware#prepareCandidate"]
+    EVICT --> COMPACT["CompactionMiddleware#prepareCandidate<br/>分离 SYSTEM / synthetic 与 conversation"]
+    COMPACT --> SUM["ConversationCompactor#compactIfNeeded<br/>修剪、参数截断、按安全边界压缩；按配置刷记忆"]
+    SUM --> CHECK["最终 token 预算与工具调用配对验证"]
+    CHECK -->|"通过且历史未并发变化"| APPLY["提交允许写回的候选历史，调用模型"]
+    CHECK -->|"超预算"| FAIL["ContextBudgetExceededException"]
 ```
 
-两点值得注意。**纯后台路径看不到子 Agent 的流式事件**：`LocalTaskRunSpec` 在后台线程里 `block()` 等结果，没有父级 Context，自然也没有转发 emitter——这是有意为之，后台任务的结果经 `SubagentsMiddleware` 以 system-reminder 形式在下一轮推回主 Agent。**同步路径超时默认不中断**：`execWithTimeoutPromotion` 让子 Agent 转去后台继续跑，只有开启 force-sync 时才会调用 `interruptAgent` 真正打断。
+这是最终请求级预算：不能只算对话 token 而漏掉系统提示词、动态来源或工具 schema。候选压缩与驱逐先计算后校验，synthetic 注入不应泄漏进持久化历史。普通压缩错误可以降级，但最终预算校验仍生效；中断与日志错误向上传播。全量历史由原生日志保存，旧版“先写一份 transcript 文件再把文件路径放摘要”的链路不能继续套用。
 
-**上下文压缩**挂在 `onReasoning` 上，每轮推理前检查一次：
+### 动作证据与验证边界
 
-```mermaid
-flowchart TB
-    CM["CompactionMiddleware#onReasoning (:84)<br/>非 ReActAgent 直接放行"] --> SPLIT["拆出首条 SYSTEM 消息，其余为 conversation"]
-    SPLIT --> CI["ConversationCompactor#compactIfNeeded (ConversationCompactor.java:92)"]
-    CI --> PRE["truncateArgs (:612) 截断超长工具参数<br/>→ pruneToolResults (:510) 修剪旧工具结果"]
-    PRE --> TOK["TokenCounterUtil#calculateToken (:73)<br/>ThinkingBlock 按实际长度计（见 7.4）"]
-    TOK --> SC{"shouldCompact (:217)？"}
-    SC -->|"否"| PASS["next.apply(原输入)"]
-    SC -->|"是"| CUT["determineCutoffIndex (:245)<br/>→ findSafeCutoffPoint (:296) 切点落在 TOOL 消息上时<br/>回退到发起该调用的 ASSISTANT 消息之前，不拆开调用与结果"]
-    CUT --> FL["flushBeforeCompact：MemoryFlushManager#flushMemories (:115)<br/>先把要被压掉的前缀蒸馏进记忆"]
-    FL --> OFF["offloadBeforeCompact：全量消息落盘，拿到文件路径"]
-    OFF --> SUMM["summarizePrefix (:344) 调模型总结前缀<br/>→ buildSummaryMessage (:454) 附带落盘路径"]
-    SUMM --> APPLY["CompactionMiddleware#applyToContext (:228)<br/>摘要 + 保留尾部 写回 AgentState"]
-    APPLY --> NEXT["next.apply(SYSTEM + 压缩后消息)"]
-    CI -.->|"异常：中断原样抛出，其余只打日志"| PASS
-```
-
-压缩的顺序是**先蒸馏、再落盘、最后总结**：被压掉的那段对话先由 `flushMemories` 提取进长期记忆，再把全量消息写到文件，摘要里带上文件路径，模型需要细节时还能读回原文。压缩失败时降级为不压缩、继续推理，但**中断异常例外**——它会原样抛出。这正是 v2.0.3 的修正（#2659），此前用户中断会被吞掉，记成一次"压缩失败"。
+`VerificationService#verify` 只接受已确认的验收条件，要求先固定任务主体版本，并查找已结束动作的证据；内置 `ShellExitCodeVerifier`、`JsonResultSchemaVerifier` 是确定性验证器。模型提出候选验收条件、工具执行成功、验收通过是三个不同事实。`taskContext(...)` 选择投影和候选工具，本身不运行验证。
 
 ## 7.4 几个容易忽略但很实用的机制
 
@@ -155,7 +127,7 @@ flowchart TB
 
 几个设计约束值得注意：
 
-- **不配 `ArtifactDeliveryTarget` 就不注册这个工具**（`Builder#artifactDeliveryTarget(...)`，`:2069`）。没有出境通道时，模型的工具列表里根本看不到它——比"工具存在但一调就报错"干净。`disableFilesystemTools` 也会一并关掉它。
+- **不配 `ArtifactDeliveryTarget` 就不注册这个工具**（`Builder#artifactDeliveryTarget(...)`）。没有出境通道时，模型的工具列表里根本看不到它——比"工具存在但一调就报错"干净。`disableFilesystemTools` 也会一并关掉它。
 - `fileName` 必须是**纯文件名**：不许有路径分隔符、不许是 `.` 或 `..`。运输目的地的命名空间不由模型的输入决定。
 - `force` 默认 `false`，同名文件存在时不覆盖——产物交付是有外部副作用的操作，默认取保守档。
 
@@ -178,35 +150,9 @@ public interface McpServerRegistrationListener {
 
 record 的紧凑构造器做了不变式校验：`SUCCESS` 不许带 `cause`，非 `SUCCESS` 必须带 `cause`。挂上 `Builder#mcpServerRegistrationListener(...)` 就能把不健康的 MCP 配置采集进监控、下线或告警——**best-effort 的语义没变，变的是失败对调用方从此可见**。
 
-### 记忆刷写改成 fire-and-forget
+### 记忆刷写与后台隔离
 
-`MemoryFlushMiddleware` 原本用 `concatWith` 把记忆刷写接在 agent 事件流后面。后果是：默认 `FlushMode.ALWAYS` 下，**每一次对话的 `onComplete` 都要等一整轮 LLM 抽取 + 磁盘写入**才发出——用户看到最后一个字之后，还要干等好几秒流才算结束。
-
-现在改为 `doOnComplete` + `subscribeOn(boundedElastic()).subscribe()`：对话流立即完成，刷写在后台跑。配套一个必要的细节——**刷写前先 `new ArrayList<>(state.getContext())` 快照一份会话列表**，否则下一次调用清空 state 时，后台还在读的那个 list 会被并发改掉。`MemoryMaintenanceMiddleware` 是同样的结构，一并改了。
-
-2.0.3 的实际实现比"起一个后台订阅"多了一层**按节流 key 排队**，避免同一用户或会话的刷写并发执行、互相踩踏：
-
-```mermaid
-flowchart TB
-    OA["MemoryFlushMiddleware#onAgent (:161)<br/>next.apply(input).doOnComplete(...)"] -->|"流正常完成才触发<br/>出错或取消都不刷"| SCH["scheduleFlush (:170)<br/>key = compositeTimerKey (:318)<br/>= memory-flush:SCOPE:timerKey"]
-    SCH --> Q{"FLUSH_QUEUES[key] 正在运行？"}
-    Q -->|"否"| RUN["runFlush (:211)<br/>Mono.defer(doFlush).subscribeOn(boundedElastic).subscribe()"]
-    Q -->|"是"| PEND["pending.put(会话键, 任务)<br/>同一会话只保留最新一个，旧的被替换"]
-    RUN --> DF["doFlush (:259)<br/>new ArrayList(state.getContext()) 快照"]
-    DF --> SH{"shouldFlushNow (:291)"}
-    SH -->|"ALWAYS"| FM["MemoryFlushManager#flushMemories (MemoryFlushManager.java:115)<br/>模型抽取 → 写 memory/YYYY-MM-DD.md"]
-    SH -->|"THROTTLED"| PG["PeriodicGate#tryClaim(key, minGap)"]
-    PG -->|"抢到时间窗"| FM
-    PG -->|"窗口内"| SKIP["跳过"]
-    SH -->|"NEVER"| SKIP
-    FM --> FIN["doFinally → drainFlushQueue (:222)<br/>取出下一个 pending 任务继续跑，队列空则移除 key"]
-    SKIP --> FIN
-    PEND -.-> FIN
-```
-
-这里有个取舍：排队的任务在**真正执行时**才读取会话状态，而不是在加入队列时读。所以一次刷写进行期间，同一会话又完成了几轮对话，只会再补一次刷写，读到的是最新的上下文，不会每一轮各刷一遍。
-
-代价是显式的：刷写失败不再影响本次对话（它已经完成了），所以**要靠日志和指标观测后台刷写，不能靠调用方的返回值**。
+`MemoryFlushMiddleware` 与 `MemoryMaintenanceMiddleware` 在完成后安排后台工作，以会话上下文快照作为输入，并通过 `PeriodicGate` 节流。调用完成不代表记忆已写完；后台失败需从日志或监控观察。当前上下文传播与隔离 key 按源码实现核对，不将旧行号当作稳定协议。
 
 ### 文件搜索工具的输出封顶
 
@@ -225,58 +171,41 @@ flowchart TB
 
 ### 子 Agent 的两处继承与描述
 
-- `Builder#subagentFactory(name, description, factory)`（`:1917`）多了带 `description` 的重载，内部存为 `HarnessAgentBuilderSupport.SubagentFactoryEntry(name, description, factory)`。以前自定义工厂注册的子 Agent 在 `agent_spawn` 的工具描述里只有名字，模型只能靠名字猜什么时候该派它；`description` 为空时仍回退为名字。
+- `Builder#subagentFactory(name, description, factory)`多了带 `description` 的重载，内部存为 `HarnessAgentBuilderSupport.SubagentFactoryEntry(name, description, factory)`。以前自定义工厂注册的子 Agent 在 `agent_spawn` 的工具描述里只有名字，模型只能靠名字猜什么时候该派它；`description` 为空时仍回退为名字。
 - 子 Agent 现在**继承父 Agent 的 memory 配置**。此前子 Agent 用默认 memory 配置，父 Agent 关掉的记忆能力在子 Agent 里又活了过来，行为不一致。
-- **父 Agent 的 DENY 规则强制下发**（2.0.1）。`AgentSpawnTool#collectParentDenyRules`（`AgentSpawnTool.java:1258`）把父 `PermissionContextState` 里的 deny 规则摊平后带给子 Agent，本地子 Agent 与远程子 Agent（经 `RemoteSubmitContext`）走同一份。只下发 DENY、不下发 ALLOW 是刻意的：**子 Agent 的权限只能比父更紧，不能借派生绕过父级的禁令**。声明式子 Agent 可以在 `SubagentDeclaration` 上关掉 `inheritParentPermissions`，默认开启。
+- **父 Agent 的 DENY 规则强制下发**（2.0.1）。`AgentSpawnTool#collectParentDenyRules`（`AgentSpawnTool.java`）把父 `PermissionContextState` 里的 deny 规则摊平后带给子 Agent，本地子 Agent 与远程子 Agent（经 `RemoteSubmitContext`）走同一份。只下发 DENY、不下发 ALLOW 是刻意的：默认继承时父 DENY 继续约束子 Agent。声明式 `inheritParentPermissions` 默认开启，但允许显式关闭，因此不能把它说成不可绕过的强制安全边界。
 
-**发版说明与 tag 不一致的一条**：v2.0.3 的 GitHub Release 列了「子 Agent 继承 pending 工具恢复开关」（#3017），但对应提交 `787aa01d` 只在 main 分支上，**v2.0.3 tag 并不包含**——tag 源码里 `enablePendingToolRecovery` 只在 `HarnessAgent.Builder`（`:1654`）和 `fromAgent` 复制时出现，不会传给子 Agent。用 2.0.3 的话，子 Agent 需要在其自身构建处显式开启。
-
-> **main 已变更（未发版）**：#3017 已在 main 合入（`787aa01d`）。父 `HarnessAgent` 的 `enablePendingToolRecovery` 会下发给声明式子 Agent 和内置的 general-purpose 子 Agent；声明式子 Agent 还可以在 Markdown frontmatter 里用 `enable_pending_tool_recovery`（或驼峰写法）单独覆盖——子 Agent 自己声明了就用自己的，没声明才继承父级。
+当前 main 会向声明式及内置通用子 Agent 下发 `enablePendingToolRecovery`，声明式 frontmatter 可单独覆盖。历史 2.0.3 应用应在其自身版本源码上核对这一行为，不能因指南 main 已支持而默认获得。
 
 ### 同一实例上的会话级操作补齐
 
-`HarnessAgent` 是组合而非继承（7.1），所以 `ReActAgent` 上新增的会话级 API 不会自动出现在它身上，得逐个转发。截至 v2.0.3 已补齐：
+`HarnessAgent` 是组合而非继承（7.1），所以 `ReActAgent` 上新增的会话级 API 不会自动出现在它身上，得逐个转发。当前 main 提供以下转发接口；原生模式的交互命令还可通过 `AgentSession` 使用：
 
 | API | 位置 | 说明 |
 |---|---|---|
-| `interrupt(ctx)` / `interrupt(ctx, msg)` / `interrupt(userId, sessionId)` / `interrupt(userId, sessionId, msg)` | `:598`~`:627` | 2.0.3 才补上（#2600）。此前 `HarnessAgent` 只有无参和 `(Msg)` 两个重载，**只能打断默认会话**——用它并发服务多会话时，业务侧根本没法中断指定用户的那一次调用 |
-| `clearContext(ctx)` / `clearContext(userId, sessionId)` | `:352` / `:365` | 清空模型可见的会话上下文，身份与权限/工具/任务状态保留（语义详见第 2 章 2.4） |
-| `clearStateCache()` 及两个按会话的重载 | `:373`~`:394` | 只释放本地缓存，不动 store |
+| `interrupt(ctx)` / `interrupt(ctx, msg)` / `interrupt(userId, sessionId)` / `interrupt(userId, sessionId, msg)` | `HarnessAgent` | 按会话身份中断；需要精确到运行时还应使用 AgentRun / runId |
+| `clearContext(ctx)` / `clearContext(userId, sessionId)` | `HarnessAgent` | 清空模型可见的会话上下文，身份与权限/工具/任务状态保留（语义详见第 2 章 2.4） |
+| `clearStateCache()` 及两个按会话的重载 | `HarnessAgent` | 只释放本地缓存，不动 store |
 
 ### 后台节流的 key 不能撞
 
-`MemoryFlushMiddleware` 与 `MemoryMaintenanceMiddleware` 都靠 `PeriodicGate`（7.3 的 `coordination` 子包）做最小间隔节流，两者配置的间隔也不同。但早期它们算出的闸门 key 都是 `isolationScope + ":" + timerKey`——**同一个 key**。结果是先跑的那个占住时间窗，另一个在窗口内一直 `tryClaim()` 失败：配置了"每 10 分钟刷写、每 6 小时维护"，实际可能维护永远跑不起来。
+记忆刷写、记忆维护使用不同的节流前缀与隔离维度。分布式部署使用 `StoreBackedPeriodicGate`，本地使用 `LocalPeriodicGate`；不能把某个会话获得执行资格误当成全局都可执行。
 
-v2.0.3 给 key 加了操作前缀（#2993）：
+### 文件系统错误必须与空结果区分
 
-```java
-return "memory-flush:"       + isolationScope.name() + ":" + timerKeyFor(rc);   // MemoryFlushMiddleware.java:319
-return "memory-maintenance:" + isolationScope.name() + ":" + timerKeyFor(rc);   // MemoryMaintenanceMiddleware.java:189
-```
-
-原来的 scope 前缀是为了隔离维度（`userId` 恰好等于某个 `sessionId` 时不串）；这次补的是**操作**维度。自己用 `PeriodicGate` 做节流时，key 要同时带上"谁"和"做什么"。
-
-### 文件系统层三处"不再把错误吞成空结果"
-
-这几条是同一类问题——**错误被伪装成合法的空结果**，模型据此做出错误决策，而且日志里什么都看不到：
-
-- **`LocalFilesystemWithShell#execute` 管道死锁**（#2839）。旧实现先 `proc.waitFor(timeout)`，结束后才 `readAllBytes()` 读 stdout/stderr。子进程输出一旦超过 OS 管道缓冲区（Linux 默认 64KiB，macOS 更小），就阻塞在写管道上等人读，而父进程在等它退出——互相等到超时，**被误报成"命令超时"**。现在改为起两个 daemon 线程（`drainAsync`，`LocalFilesystemWithShell.java:464`）在 `waitFor`（`:358`）期间并发读空两个流。这是 `ProcessBuilder` 的经典坑，自己写进程调用时同样适用。
-- **沙箱文件系统读操作**（#2967）。`ls` / `read` / `grep` / `glob` 此前不检查 `execute()` 是否成功：命令本身没跑起来（沙箱失联、超时）时，`ls` 返回空列表、`read` 返回 `file_not_found`，模型会以为"目录是空的""文件不存在"然后去新建。现在 `BaseSandboxFilesystem` 统一先判 `isSuccess()`，失败就带上 `executeFailureMessage`（`:458`）返回错误；只有"命令确实跑了、退出码 >0 且不是超时的 124"才仍判为文件不存在。
-- **`ls()`**（#2413）同理，`LocalFilesystem`、`BaseSandboxFilesystem` 与 `FilesystemTool` 三处一起改为出错即报错，而不是静默返回空列表。
+`LocalFilesystemWithShell` 并发排空子进程 stdout/stderr，避免先 wait 再读导致管道堵塞。`BaseSandboxFilesystem` 的执行失败会转成错误，调用者不能把失败解释为空目录或文件不存在。遇到超时要同时检查子进程执行、输出截断与沙箱连接，不能只重试路径。
 
 ### 压缩的 token 估算把 thinking 算进去了
 
-`TokenCounterUtil`（`memory/compaction/TokenCounterUtil.java:132`）估算上下文 token 数时，`ThinkingBlock` 以前按一个固定的兜底开销计。推理模型一轮的 thinking 可能有几千 token，被严重低估的后果是**压缩触发得太晚**，真正发请求时才撞上模型的上下文上限。现在按 thinking 文本实际长度估算，嵌套在 `ToolResultBlock` 里的 thinking 也一并计入（#3009）。
+`TokenCounterUtil`（`memory/compaction/TokenCounterUtil.java`）估算上下文 token 数时，`ThinkingBlock` 以前按一个固定的兜底开销计。推理模型一轮的 thinking 可能有几千 token，被严重低估的后果是**压缩触发得太晚**，真正发请求时才撞上模型的上下文上限。现在按 thinking 文本实际长度估算，嵌套在 `ToolResultBlock` 里的 thinking 也一并计入（#3009）。
 
 ### 其它 2.0.1 起的小项
 
-- 默认工作区可由环境变量 `AGENTSCOPE_WORKSPACE`（`:1160`）指定，便于镜像打包时把工作区挂到固定卷上。解析顺序是系统属性 `agentscope.workspace` → 环境变量 `AGENTSCOPE_WORKSPACE` → `${user.dir}/.agentscope/workspace`（`resolveDefaultWorkspace`）。
+- 默认工作区可由环境变量 `AGENTSCOPE_WORKSPACE`指定，便于镜像打包时把工作区挂到固定卷上。解析顺序是系统属性 `agentscope.workspace` → 环境变量 `AGENTSCOPE_WORKSPACE` → `${user.dir}/.agentscope/workspace`（`resolveDefaultWorkspace`）。
 
 ### main 新增：宿主与 Agent 看到的工作区不一致（#3247、#3020）
 
-> **main 已变更（未发版）**。
-
-宿主程序用 `java.nio` 往工作区根目录写文件（比如 `uploads/{sessionId}/result.md`），Agent 的文件工具却读不回来：默认后端以 `UNRESTRICTED` 模式构建，还带一个按用户分的命名空间，相对路径解析到 `{workspace}/{userId}/...`，而宿主写的是 `{workspace}/...`。这是一种静默的读写不对称，模型会花几十轮去试各种路径变体（#3245）；`UNRESTRICTED` 还允许 `list_files` 一路往上走到盘符根。
+宿主程序用 `java.nio` 往工作区根目录写文件（比如 `uploads/{sessionId}/result.md`），Agent 的文件工具却读不回来：历史默认后端带有按用户分的命名空间，相对路径解析到 `{workspace}/{userId}/...`，而宿主写的是 `{workspace}/...`。这是一种静默的读写不对称，模型会花几十轮去试各种路径变体（#3245）；`UNRESTRICTED` 还允许 `list_files` 一路往上走到盘符根。
 
 main 在 `RemoteFilesystemSpec` 和 `LocalFilesystemSpec` 上加了可选开关 `sharedLocalWorkspace(true)`（#3247，默认关闭，保持原行为）：开启后默认后端改为沙箱化的 `LocalFilesystem`，工作区根共享、没有命名空间前缀，绝对路径被重新挂到工作区下、`..` 直接拒绝；`memory/`、`skills/` 这类共享路由仍保留按用户的命名空间。
 
@@ -286,18 +215,14 @@ main 在 `RemoteFilesystemSpec` 和 `LocalFilesystemSpec` 上加了可选开关 
 
 ### main 新增：沙箱上传下载的两处修正
 
-> **main 已变更（未发版）**。
-
 - **大文件上传必失败**（#2923，修 #2618）：`SandboxFileTransfer` 接口早就有，但没有一个沙箱实现它，上传一律走“Base64 编码后拼进 shell 命令”的兜底；`DockerSandbox` 把整条命令当成 `docker exec` 的一个参数传进去，大文件直接超过系统的 `ARG_MAX`。现在 Docker 沙箱实现了原生文件传输，下载时也会拒绝被截断的结果，不再把半个文件当成完整文件交出去。
 - **非 UTF-8 文件被破坏**（#2456，修 #2447）：上传内容改为严格 UTF-8 解码，解不了就退回 Base64，二进制文件上传再下载能原样往返。
 
 ### main 新增：记忆与会话检索支持多关键词（#3062）
 
-> **main 已变更（未发版）**。
-
 `memory_search` 和 `session_search` 多了一个 `matchMode` 参数：`phrase`（默认，整串子串匹配，和以前一样）、`all`（空格分隔的关键词全部出现在同一行记忆或同一条会话记录里）、`any`（至少出现一个）。都是不区分大小写的字面匹配，**不做中文自动分词**，中文关键词要自己用空格隔开。
 
-> **main 已变更（未发版）**：内置的 `web_fetch` 与 `web_search`（后者依赖 Tavily，需要 `TAVILY_API_KEY`）在 2.0.3 的 `Builder#build` 里是**无条件注册**的（v2.0.3 `HarnessAgent.java:2670`；main 上这段在 `:2738`，外面包了一层 `if (!disableWebTools)`），不受任何开关控制——内网部署时模型照样能在工具列表里看到它们，调用时才失败。main 新增 `Builder#disableWebTools()`（#3075），以及 `Builder#webHttpClient(HttpClient)`，用于注入自定义的 `HttpClient`，比如配代理或出网白名单（#3103）。
+当前 main 通过 `Builder#disableWebTools()` 控制 `web_fetch` 与 `web_search` 注册；后者依赖 Tavily。`Builder#webHttpClient(HttpClient)` 允许宿主注入代理或出网策略。工具是否注册与调用时是否有可用网络、凭证是两个检查点。
 
 ## 7.5 何时用 ReActAgent，何时用 HarnessAgent
 
@@ -307,7 +232,9 @@ main 在 `RemoteFilesystemSpec` 和 `LocalFilesystemSpec` 上加了可选开关 
 | 需要文件系统/工作区、长任务、上下文压缩、子 Agent、Plan Mode、沙箱执行代码 | `HarnessAgent` |
 | 已有 ReActAgent 想加渠道/工程能力 | `HarnessAgent.Builder.fromAgent(agent)` 包装 |
 
-## 7.6 customer_work 实战
+## 7.6 customer_work 实战（历史应用快照）
+
+以下只描述 `17007e4a`（2026-10-02）依赖 2.0.3 的应用装配，不是当前 main 的可直接运行模板。升级时必须先决定原生 journal 与 legacy StateStore 的边界；当前新增的上下文预算、动作证据、验证与会话门面不会因为更新文档自动接入历史应用。
 
 ### 全量配置的 HarnessAgent 装配
 
@@ -316,7 +243,7 @@ main 在 `RemoteFilesystemSpec` 和 `LocalFilesystemSpec` 上加了可选开关 
 ```
 HarnessAgent.Builder.fromAgent(innerReActAgent)
   .stateStore(...)  .permissionContext(...)
-  .generateOptions(...)          ← 规避框架 #1644：不显式设置则 streamEvents NPE（第 10 章坑 2）
+  .generateOptions(...)          ← 历史应用显式设置生成参数（历史适配见第 10 章坑 2）
   .workspace(...)  .compaction(ContextMemoryFactory#createCompaction)   ← CompactionConfig 按 yml 的
                                     context.{compression-enabled,max-token,msg-threshold,last-keep} 生成
   .memory(MemoryConfig)  .environmentMemory(...)
@@ -345,3 +272,5 @@ admin 的 VibeCoding 场景里，子 Agent 后台任务（`agent_spawn`）默认
 ### 多 Agent 编排：框架之外的 Reactor 手工编排
 
 1.x 的 `Pipelines` 编排 API 在 2.0 已移除。`MultiAgentOrchestrator#consult` 用纯 Reactor 实现"快慢车道"：规则快车道（关键词命中唯一意图直接路由）→ LLM 分诊 → fanout 三个专家 ReActAgent（各自 `subscribeOn(boundedElastic)` + `maxConcurrency` 限流 + 单专家 timeout 隔离）→ reduce 归纳统一口径。**框架提供 Agent 原语，编排交给通用响应式代数**——这是 2.0 的明确取向（详细链路见第 9 章场景 8）。
+
+源码定位：[HarnessAgent 装配与调用](https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-harness/src/main/java/io/agentscope/harness/agent/HarnessAgent.java)、[最终上下文准备](https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-harness/src/main/java/io/agentscope/harness/agent/context/HarnessContextBuilder.java)、[AgentSession](https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-harness/src/main/java/io/agentscope/harness/agent/session/AgentSession.java)、[验证服务](https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-harness/src/main/java/io/agentscope/harness/agent/verification/VerificationService.java)。

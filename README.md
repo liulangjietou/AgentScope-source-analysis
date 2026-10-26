@@ -1,125 +1,118 @@
 # AgentScope Java 源码阅读指南
 
-> 面向版本：`io.agentscope:agentscope-*` **2.0.3**（正式版，tag `v2.0.3` = `1b8e3dcd`，2026-09-07 发布；customer_work 实战部分基于 2.0.0 GA）
-> 框架仓库：[agentscope-ai/agentscope-java](https://github.com/agentscope-ai/agentscope-java)（全部行号校准至 `v2.0.3` tag，发版 tag 不会漂移；读 main 分支时行号可能已变，用类名/方法名定位比行号可靠）
-> 实战项目：[liulangjietou/customer_work](https://github.com/liulangjietou/customer_work)（基于 2.0.0 GA 的生产级智能客服系统）
->
-> 本指南所有"框架路径"均相对 agentscope-java 仓库根，所有"实战路径"均相对 customer_work 仓库根。
-> 正文中形如 **「main 已变更（未发版）」** 的引用块，标注的是上游 main 分支在 v2.0.3 之后已合入、但尚未发版的变更（核对至 main `7d321e2b`）；正文本身与行号仍以 v2.0.3 为准。
-> 所有流程图/架构图/模块图节点使用正文中出现过的 `类名#方法名`，图文一一对应；方法级调用链图的节点附行号 `(:N)`，框架侧对应 v2.0.3 源码，第 9 章 customer_work 侧对应其 `85fde31` 提交。
-
----
+> **源码版本：`2.1.0-SNAPSHOT`**。全文框架说明与图片统一对齐官方 **main [`dcb131a3f257f06e2b7ddcd3dacfe75d31d04028`](https://github.com/agentscope-ai/agentscope-java/commit/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028)**，核对日期 **2026-10-26**。
+> 框架仓库：[agentscope-ai/agentscope-java](https://github.com/agentscope-ai/agentscope-java)。版本来自该提交根 `pom.xml` 的 `<revision>`；源码链接固定到完整 SHA，后续 main 移动不会使本次说明的定位漂移。
+> [基线与核对记录](SOURCE_BASELINE.md) 列出源码入口、模块计数口径和复验方法。历史版本仅用于解释迁移差异，不能代替当前实现。
+> customer_work 实战保持独立的历史快照 **`17007e4a`（依赖 `2.0.3`）**，不表示该应用已升级到 `2.1.0-SNAPSHOT`。框架路径相对 agentscope-java 根目录；实战路径相对 customer_work 根目录。
 
 ## 一、这份指南怎么读
 
-AgentScope Java 是阿里开源的 **Agent 编程框架**，全面基于 Project Reactor（`Mono`/`Flux`）构建，JDK 17。它的分层非常清晰：
+AgentScope Java 基于 Java 17 与 Project Reactor（`Mono` / `Flux`）构建 Agent。理解一次调用，需要同时看清执行循环、会话状态和事件流：
 
-- **`agentscope-core`**：框架内核。ReAct 循环、消息模型、状态持久化、工具系统、模型抽象、Middleware 扩展机制——**读懂它就读懂了框架 80% 的运行原理**。
-- **`agentscope-harness`**：工程化外壳。在 ReActAgent 之上组合出 HarnessAgent，叠加 workspace、沙箱、子 Agent、记忆压缩、Plan Mode 等"长任务工程能力"。
-- **`agentscope-extensions`**：19 个一级模块、59 个可发布 artifact 的外部集成生态（模型厂商、RAG、长期记忆、Redis/JDBC/PostgreSQL 存储、云沙箱、协议层、IM 渠道、Spring Boot Starter）。
-- **`agentscope-service`**：2.0.3 新增的管控平台（Go 实现的 aistiod 控制面 + Java 的 gateway/dataplane/scheduler 三平面，提供 Managed Agents 与 Agent Teams），基于 HarnessAgent，属于框架的消费者而非组成部分——第 8 章 8.3 单列。
+- **`agentscope-core`**：ReAct 循环、消息与状态、原生 Session 日志、工具、模型抽象、Middleware、权限和动作观测。当前有 **22 个直接子包**。
+- **`agentscope-harness`**：组合 ReActAgent，装配工作区、文件系统、沙箱、子 Agent、上下文预算、压缩与验证能力；`AgentSession` 提供会话操作入口。
+- **`agentscope-extensions`**：22 个一级 Maven 模块（包含 starters 聚合），递归有 **67 个 jar 模块，其中 66 个允许发布**；包括模型、存储、RAG、长期记忆、渠道、协议、沙箱、评测和 14 个 starter。聚合 POM 与不发布的模型端到端测试模块单独计数，见第 8 章。
+- **`agentscope-service`**：框架之上的管控平台。Go 控制面位于 `service-controlplane`，Java 侧有 gateway / dataplane / scheduler / common；它消费 Harness 与扩展能力，不是执行一次裸 ReAct 调用的前提。
 
-**核心/非核心的划分口径（按主执行链路）**：
+阅读顺序建议从数据进入执行，再看工程化组合：
 
-| 分类 | 内容 | 判断标准 |
-|---|---|---|
-| **核心** | core 的 message/state/agent/model/tool/middleware/event/permission 包 + ReAct 主循环 + HarnessAgent 主链路 | 读不懂这些，框架就用不明白：任何一次 `agent.call()` 都会走完这些代码 |
-| **非核心** | extensions 生态（模型厂商实现、RAG、记忆、存储、沙箱、协议、渠道、starter）、core 的 rag/skill/tracing/credential 等外围包 | 按需查阅：不用某能力就不必读，接口边界清晰 |
-
-**建议阅读顺序**：
-
-```
-第 1 章（模块全景）→ 第 2 章（消息与状态：数据模型是理解一切的前提）
-→ 第 3 章（ReAct 主循环：全书最重要的一章）→ 第 4 章（工具系统）
-→ 第 5 章（模型层）→ 第 6 章（Middleware/Hook/事件流）
-→ 第 7 章（Harness）→ 第 8 章（扩展生态，按需）
-→ 第 9 章（customer_work 17 个场景全景映射）→ 第 10 章（避坑清单）
+```text
+1 模块地图 → 2 消息、状态与 Session → 3 ReAct 主循环
+→ 4 工具系统 → 5 模型层 → 6 Middleware 与事件流
+→ 7 Harness → 8 扩展生态 → 9 历史应用映射 → 10 避坑与迁移
 ```
 
-每个核心章节末尾都有 **「customer_work 实战」** 小节，展示该能力在真实生产项目里的用法与调用链；第 9 章再从业务场景视角做一次总映射，两个视角互补。
+“主链相关”不等于“每次调用都执行”：没有工具调用就不会执行工具，未配置 SessionLogStore 的裸 ReActAgent 仍可走 legacy 状态路径，外部扩展按依赖与配置启用。
 
 ## 二、章节目录
 
-| 章 | 文件 | 定位 | 一句话 |
-|---|---|---|---|
-| 1 | [01-模块全景与依赖拓扑.md](01-模块全景与依赖拓扑.md) | 核心 | 7 个 Maven 模块、core 的 20 个包地图、依赖方向 |
-| 2 | [02-消息与状态模型.md](02-消息与状态模型.md) | 核心 | Msg/ContentBlock/AgentState/AgentStateStore + 乐观并发，2.0 状态体系的地基 |
-| 3 | [03-ReAct主循环.md](03-ReAct主循环.md) | **核心的核心** | ReActAgent 5355 行拆解：call → reasoning → acting → summarizing 全链路，含入口分流与异常/中断出口链路图 |
-| 4 | [04-工具系统.md](04-工具系统.md) | 核心 | Toolkit 门面、@Tool 注解 → Schema 生成 → 反射执行、默认并行与并发分区、MCP 接入 |
-| 5 | [05-模型层.md](05-模型层.md) | 核心 | Model 抽象、Formatter 五件套、SSE 流式传输与背压、Prompt Caching、9 个 providerId 的 SPI |
-| 6 | [06-Middleware与事件流.md](06-Middleware与事件流.md) | 核心 | 五切点洋葱模型与 `order()` 排序、改写事件流与改写历史的区别、遗留 Hook / Tracer、31 种 AgentEvent |
-| 7 | [07-Harness工程化外壳.md](07-Harness工程化外壳.md) | 核心 | HarnessAgent 组合模式、workspace/沙箱/子 Agent/记忆压缩/Plan Mode、2.0.1~2.0.3 的机制补齐 |
-| 8 | [08-扩展生态.md](08-扩展生态.md) | 非核心 | 59 个 extension artifact 速览与选型 + agentscope-service 平台 |
-| 9 | [09-customer_work场景全景映射.md](09-customer_work场景全景映射.md) | 实战 | 17 个业务场景 → AgentScope 能力 → 源码调用链，主干场景附方法级链路图 |
-| 10 | [10-避坑清单.md](10-避坑清单.md) | 实战 | 生产项目踩过的 10+ 个坑、2.0.0 GA → 2.0.3 行为变化、发版说明与 tag 源码不一致的三处 |
+| 章 | 文件 | 主要问题 |
+|---|---|---|
+| 1 | [模块全景与依赖拓扑](01-模块全景与依赖拓扑.md) | 7 个顶层 Maven 模块、22 个 core 包，依赖方向是什么？ |
+| 2 | [消息与状态模型](02-消息与状态模型.md) | Msg、AgentState、SessionLog 与 StateStore 各保存什么？ |
+| 3 | [ReAct 主循环](03-ReAct主循环.md) | 公共入口如何进入推理/行动，如何暂停、取消与保存？ |
+| 4 | [工具系统](04-工具系统.md) | 工具视图、Schema、参数解析、拦截器、进度和 MCP 如何连接？ |
+| 5 | [模型层](05-模型层.md) | 模型请求准备、协议转换、SSE、缓存和 10 个 SPI providerId 如何工作？ |
+| 6 | [Middleware 与事件流](06-Middleware与事件流.md) | 五个变换切点与状态就绪回调如何运行，32 种事件在哪里发布？ |
+| 7 | [Harness 工程化外壳](07-Harness工程化外壳.md) | AgentSession、上下文、沙箱、子 Agent、压缩和验证如何组合？ |
+| 8 | [扩展生态](08-扩展生态.md) | 66 个可发布 jar 的能力边界，以及 service 的当前结构是什么？ |
+| 9 | [customer_work 场景全景映射](09-customer_work场景全景映射.md) | 17 个历史业务场景如何使用框架，与当前 main 有哪些边界？ |
+| 10 | [避坑清单](10-避坑清单.md) | 历史问题在当前源码中的状态与迁移约束是什么？ |
 
 ## 三、全局架构图
 
-下图是整个框架的模块分层与一次调用的宏观流向。图中每个节点都会在对应章节展开：`ReActAgent#call` 系列见第 3 章，`Toolkit#callTools` 见第 4 章，`Model#stream` 见第 5 章，`MiddlewareChain#build` 见第 6 章，`HarnessAgent#call` 见第 7 章。
+实线表示应用入口、组合关系或执行流；虚线表示可插拔接口实现。调用细节见第 3 章，依赖拓扑见第 1 章。
 
 ```mermaid
 flowchart TB
-    subgraph APP["应用层（如 customer_work）"]
-        USER["业务代码 / Controller"]
+    APP["应用 / Controller"]
+    subgraph HARNESS["agentscope-harness"]
+        SESSION["AgentSession<br/>会话操作"]
+        HA["HarnessAgent<br/>组合 ReActAgent"]
+        HMW["上下文 / 工作区 / 压缩 / 子 Agent / 沙箱"]
+        SESSION --> HA
+        HA --> HMW
     end
-
-    subgraph HARNESS["agentscope-harness（工程化外壳，第 7 章）"]
-        HA["HarnessAgent#call<br/>组合而非继承：内部持有 ReActAgent delegate"]
-        HMW["内置 Middleware 链<br/>Workspace / Compaction / Subagent / PlanMode / Sandbox"]
+    subgraph CORE["agentscope-core"]
+        RA["ReActAgent#buildAgentStream<br/>运行身份与 onAgent 链"]
+        LIFE["AgentBase#runLifecycle<br/>串行准入 + 会话资源边界"]
+        STATE["AgentState<br/>当前可恢复状态"]
+        STORE["SessionRecorder / SessionLogStore<br/>或 legacy AgentStateStore"]
+        REASON["CallExecution#reasoning"]
+        MODEL["Model#stream"]
+        CHECK{"结束、暂停或继续？"}
+        ACT["CallExecution#acting<br/>权限与工具执行"]
+        TK["Toolkit → ToolExecutor"]
+        DONE["保存状态并完成 / 暂停"]
     end
-
-    subgraph CORE["agentscope-core（内核）"]
-        RA["ReActAgent#call → doCall（第 3 章）"]
-        MWC["MiddlewareChain#build 洋葱链（第 6 章）"]
-        REASON["CallExecution#reasoning 推理"]
-        ACT["CallExecution#acting 行动"]
-        TK["Toolkit#callTools（第 4 章）"]
-        MODEL["Model#stream（第 5 章）"]
-        STATE["AgentState / AgentStateStore（第 2 章）"]
+    subgraph EXT["agentscope-extensions"]
+        PROVIDER["模型 provider / formatter"]
+        BACKEND["状态与会话存储实现"]
+        MCP["MCP 与外部工具"]
     end
-
-    subgraph EXT["agentscope-extensions（第 8 章）"]
-        PROVIDER["5 个原生 ChatModel<br/>+ DeepSeek/GLM/Kimi/MiniMax 兼容提供商"]
-        STORE["RedisAgentStateStore / MysqlAgentStateStore"]
-        MCP["MCP / Higress / RAG / 长期记忆 / 渠道 / Starter"]
-    end
-
-    USER -->|"可直接用 ReActAgent"| RA
-    USER -->|"需要工程化能力时"| HA
-    HA --> HMW --> RA
-    RA --> MWC
-    MWC --> REASON --> MODEL
-    MWC --> ACT --> TK
-    ACT -->|"无工具调用则结束，否则回到推理"| REASON
-    MODEL -.->|"SPI 实现"| PROVIDER
-    RA <-->|"每次调用加载/保存"| STATE
-    STATE -.->|"可插拔后端"| STORE
-    TK -.->|"MCP 工具注册"| MCP
+    APP --> SESSION
+    APP --> HA
+    APP --> RA
+    HMW --> RA
+    RA --> LIFE
+    LIFE --> STATE
+    STATE <--> STORE
+    LIFE --> REASON
+    REASON --> MODEL
+    MODEL --> CHECK
+    CHECK -->|"普通终态 / 中间件停止"| DONE
+    CHECK -->|"仍需行动"| ACT
+    ACT -->|"允许的本地工具"| TK
+    TK -->|"工具结果回到下一轮"| REASON
+    ACT -->|"权限确认 / 外部执行 / returnDirect"| DONE
+    DONE --> STORE
+    PROVIDER -.-> MODEL
+    BACKEND -.-> STORE
+    MCP -.-> TK
 ```
 
-另附一张 `agent.call(msgs)` 宏观调用链的五层全景图（细节见第 3 章）：
+下图展开公共入口、运行身份、生命周期、ReAct 循环与持久化分支。它与正文使用相同的 main SHA；点击 SVG 内的方法可以跳转到对应源码。
 
-![agent.call 宏观调用链五层全景图](images/agent-call-chain.svg)
+![agent.call 宏观调用链：2.1.0-SNAPSHOT main dcb131a3](images/agent-call-chain.svg)
 
-## 四、customer_work 项目速览
+## 四、customer_work 实战的使用边界
 
-customer_work 是一个把"客服业务流程图落成生产代码"的完整项目，5 个 Maven 模块 + 2 个前端：
-![智能体客服项目](https://github.com/liulangjietou/customer_work)
+[customer_work](https://github.com/liulangjietou/customer_work/tree/17007e4a) 是业务集成对照材料。本指南保留 `17007e4a` 快照中的客服、RAG、模型路由、子 Agent、人工确认等场景；第 9 章应用侧调用图依据该快照，框架侧解释依据本次 main。
 
-| 模块 | 端口 | 职责 | 与 AgentScope 的关系 |
-|---|---|---|---|
-| `customer-work-starter` | — | 可复用智能体基础设施（Spring Boot 自动装配） | 直接依赖 20 个 agentscope artifact，是绝大多数集成代码所在地 |
-| `customer-work-app-server` | 8080 | 面向用户的客服应用（HTTP/SSE/WebSocket） | 无直接依赖，全部经 starter 传递 |
-| `customer-channel` | 8081 | 多渠道接入（钉钉/飞书/企微/微信 + 官方五套 Web 端） | 依赖官方 starter 与 channel 扩展 |
-| `customer-admin-server` | 8082 | 后台管理（模型/MCP/智能体配置、工作区对话、VibeCoding） | 依赖 A2A 扩展；**排除 starter 自动装配，显式 new** |
-| `customer-work-gateway` | — | Spring Cloud Gateway 统一路由 | 无 agentscope 依赖 |
+| 应用模块 | 职责与框架关系 |
+|---|---|
+| `customer-work-starter` | 业务 Agent 装配、模型与工具接入、会话和记忆等可复用基础设施 |
+| `customer-work-app-server` | 用户对话入口，经 starter 编排应用能力 |
+| `customer-channel` | 消息渠道与官方 Web starter 接入 |
+| `customer-admin-server` | 管理、工作区对话与 Agent 配置，包含独立的运行时装配 |
+| `customer-work-gateway` | 应用路由，不承担 ReAct 执行职责 |
 
-它用到了约 **130+ 个 AgentScope 类型**，覆盖 17 个业务场景，是"框架每个能力在生产中长什么样"的最佳对照材料——详见第 9 章。
+阅读实战时先确认应用依赖版本；本文并未把该历史应用迁移到新的 Native Session、上下文构建或工具扩展接口。
 
 ## 五、框架自带的对照学习材料
 
-- `agentscope-examples/documentation/src/main/java/io/agentscope/examples/documentation2/`：14 个子包（context / harness / hitl / mcp / middleware / model / multimodal / quickstart / **rag** / skill / state / streaming / structuredoutput / tool）与官方文档章节一一对应。
-- `agentscope-examples/` 下另有 3 个完整应用（`agents/agentscope-{codingagent,dataagent,paw}`）与两个前端集成示例（`agui`、`agentscope-copilotkit`）。原先的 `agentscope-builder` 已升级为 `agentscope-service` 的 Managed Agents（第 8 章 8.3）。
-- `docs/v2/zh/docs/`：中文官方文档，其中 `harness/architecture.md` 与 `building-blocks/middleware.md` 最值得逐字读。
-- 根目录 `SKILL.md`：给 AI 编码助手的项目规约，`PROHIBITED PRACTICES` 与 `COMMON PITFALLS` 两节记录了框架的隐含约定（尤其 Reactor 使用禁忌）。
-- 版本变更记录分两处：`docs/v2/zh/docs/others/release-notes.md` 截至 v2.0.3 tag **只写到 2.0.1**；2.0.2 与 2.0.3 的变更只在 [GitHub Releases](https://github.com/agentscope-ai/agentscope-java/releases)。本指南对 2.0.1~2.0.3 的补充即以这三份发版说明为清单、逐条对照 tag 源码核实，其中不一致的三处见第 10 章 10.3。
+- `agentscope-examples/documentation/src/main/java/io/agentscope/examples/documentation2/`：17 个直接子包，包括 `agui`、`copilotkit`、`judge`、`harness`、`middleware`、`model`、`state`、`tool` 等，与官方文档和能力示例对应。
+- `agentscope-examples/pom.xml`：当前聚合 `documentation`、`jev` 和 paw / chat / dataagent / codingagent 四个应用。不要把已移动的旧示例目录当作当前 Maven 模块。
+- `docs/v2/zh/docs/`：中文官方文档；`harness/architecture.md`、`building-blocks/middleware.md` 可辅助理解，但最终以同一 SHA 的 Java 实现为准。
+- 根目录 `SKILL.md`：框架约定与 Reactor 使用限制。
+- `docs/v2/zh/docs/others/release-notes.md`：该 main 快照已有 `2.0.4`、`2.0.3` 等记录；发布历史与当前 POM 版本是不同事实。本指南不再使用“所有 main 改动尚未发布”这一笼统判断。
