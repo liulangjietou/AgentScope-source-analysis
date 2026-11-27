@@ -93,14 +93,16 @@ def main():
                 path = file.parent / unquote(url.split('#', 1)[0])
                 check(path.exists(), f'{file.name}: missing local target: {url}')
 
-    svg_path = root / 'images/agent-call-chain.svg'
-    svg = ET.parse(svg_path)
-    check(sha in svg_path.read_text(), 'SVG missing current full SHA')
-    for link in svg.iter('{http://www.w3.org/2000/svg}a'):
-        url = link.get('{http://www.w3.org/1999/xlink}href') or link.get('href', '')
-        if url.startswith(prefix):
-            source_links.add(url)
-            check(url[len(prefix):].startswith(sha + '/'), 'SVG uses a non-baseline source link')
+    svg_files = sorted((root / 'images').glob('*.svg'))
+    check(bool(svg_files), 'No SVG diagrams found under images/')
+    for svg_path in svg_files:
+        svg = ET.parse(svg_path)
+        check(sha in svg_path.read_text(), f'{svg_path.name}: SVG missing current full SHA')
+        for link in svg.iter('{http://www.w3.org/2000/svg}a'):
+            url = link.get('{http://www.w3.org/1999/xlink}href') or link.get('href', '')
+            if url.startswith(prefix):
+                source_links.add(url)
+                check(url[len(prefix):].startswith(sha + '/'), f'{svg_path.name}: SVG uses a non-baseline source link')
 
     for url in sorted(source_links):
         tail = url[len(prefix):].split('/', 1)[1]
@@ -118,7 +120,7 @@ def main():
         for error in errors:
             print('ERROR:', error, file=sys.stderr)
         return 1
-    print(f'PASS: {sha[:8]} / {version}; {len(facts)} counts; {len(source_links)} unique source links; Markdown and SVG structure')
+    print(f'PASS: {sha[:8]} / {version}; {len(facts)} counts; {len(source_links)} unique source links; {len(svg_files)} SVGs verified')
     return 0
 
 

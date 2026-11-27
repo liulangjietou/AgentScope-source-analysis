@@ -1,169 +1,216 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1320 1850" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif">
-<title id="title">AgentScope Java 2.1.0-SNAPSHOT：agent.call 与 streamEvents 调用链</title>
-<desc id="desc">基线 main dcb131a3f257f06e2b7ddcd3dacfe75d31d04028。入口共享事件流核心；运行身份经过 onAgent 链进入 AgentBase 生命周期；会话串行准入后，按配置获取 Native Session 或 legacy 状态；ReAct 推理、工具与暂停分流；状态保存、生命周期资源释放和事件结束分开处理。点击方法名可查看固定提交源码。</desc>
-<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#7389a5"/></marker></defs>
-<rect width="1320" height="1850" rx="18" fill="#0b1220"/>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1320 1890" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+<title id="title">AgentScope Java 2.1.0-SNAPSHOT：agent.call 与 streamEvents 五层调用链</title>
+<desc id="desc">基线 main 80926f92df182d258118456ae458043af0d7e807。公共入口共享 buildAgentStream 核心；四级身份与入口模型解析后经 onAgent 链进入 AgentBase 生命周期；按 Thread 串行准入后获取 ThreadJournal（含 2.0 基线自动导入）或 standalone 状态，解析 CapabilitySurface 授权面；ReAct 推理、宿主恢复边界、授权/权限门与工具派发；onAgentFinish 收尾、双轨状态保存、释放租约与最终事件输出。点击蓝色/绿色/金色标题可直达固定 SHA 源码声明行。</desc>
+<defs>
+  <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+    <path d="M0 0L8 4L0 8Z" fill="#7389a5"/>
+  </marker>
+</defs>
+<rect width="1320" height="1890" rx="18" fill="#0b1220"/>
 
-<text x="38" y="50" font-size="31" fill="#f1f6ff" font-weight="700">agent.call / streamEvents</text>
-<text x="38" y="85" font-size="20" fill="#99adc7" font-weight="400">从公共入口到会话资源释放 · 五层调用图</text>
-<text x="906" y="45" font-size="17" fill="#72b6ff" font-weight="600">AgentScope Java 2.1.0-SNAPSHOT</text>
-<text x="906" y="72" font-size="16" fill="#99adc7" font-weight="400">main dcb131a3 · 2026-10-26</text>
-<text x="38" y="119" font-size="16" fill="#99adc7" font-weight="400">实线表示执行流；虚线表示条件路径。方法名可点击；正文与图片使用同一份源码基线。</text>
-<rect x="34" y="143" width="1252" height="197" rx="15" fill="#101b2d" stroke="#2a3a51"/>
-<text x="56" y="176" font-size="21" fill="#cfe2ff" font-weight="600">01  公共入口</text>
-<text x="56" y="202" font-size="15" fill="#99adc7" font-weight="400">HarnessAgent 包装调用；AgentSession 编排会话操作；最终由 ReActAgent 执行。</text>
-<rect x="56" y="223" width="385" height="93" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java#L240" target="_blank">
-<text x="74" y="251" font-size="18" fill="#72b6ff" font-weight="600">AgentBase#call</text>
+<text x="38" y="50" font-size="30" fill="#f1f6ff" font-weight="700">agent.call / streamEvents</text>
+<text x="38" y="84" font-size="19" fill="#99adc7" font-weight="400">从公共入口、ThreadJournal 租约、授权裁剪到资源释放 · 五层源码调用全景图</text>
+<text x="890" y="46" font-size="17" fill="#72b6ff" font-weight="600">AgentScope Java 2.1.0-SNAPSHOT</text>
+<text x="890" y="73" font-size="15" fill="#99adc7" font-weight="400">main 80926f92 · 2026-11-27 核对</text>
+<text x="38" y="118" font-size="15" fill="#99adc7" font-weight="400">实线表示必经主干流；虚线表示模式/条件分流。各卡片标题均绑定完整 SHA 源码行号，点击即可跳转。</text>
+
+<!-- Layer 01 -->
+<rect x="34" y="140" width="1252" height="198" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="173" font-size="21" fill="#cfe2ff" font-weight="600">01  公共调用入口</text>
+<text x="56" y="199" font-size="15" fill="#99adc7" font-weight="400">HarnessAgent 管理沙箱租约后委托 ReActAgent；DurableRuntime 通过 AgentScopeAdapter 驱动底层 streamEvents。</text>
+
+<rect x="56" y="219" width="385" height="98" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java#L244" target="_blank">
+  <text x="74" y="247" font-size="18" fill="#72b6ff" font-weight="600">AgentBase#call</text>
 </a>
-<text x="74" y="277" font-size="16" fill="#b1c2d7" font-weight="400">callInternal → 提取末个</text>
-<text x="74" y="301" font-size="16" fill="#b1c2d7" font-weight="400">AgentResultEvent 中的 Msg</text>
-<rect x="468" y="223" width="385" height="93" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1464" target="_blank">
-<text x="486" y="251" font-size="18" fill="#72b6ff" font-weight="600">ReActAgent#streamEvents</text>
+<text x="74" y="273" font-size="15" fill="#b1c2d7" font-weight="400">支持普通对话与结构化输出重载</text>
+<text x="74" y="297" font-size="15" fill="#b1c2d7" font-weight="400">经 callInternal 汇入统一事件流核心</text>
+
+<rect x="468" y="219" width="385" height="98" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1762" target="_blank">
+  <text x="486" y="247" font-size="18" fill="#72b6ff" font-weight="600">ReActAgent#streamEvents</text>
 </a>
-<text x="486" y="277" font-size="16" fill="#b1c2d7" font-weight="400">直接返回 AgentEvent 流</text>
-<text x="486" y="301" font-size="16" fill="#b1c2d7" font-weight="400">与 call 共用 buildAgentStream</text>
-<rect x="880" y="223" width="383" height="93" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1409" target="_blank">
-<text x="898" y="251" font-size="18" fill="#72b6ff" font-weight="600">prepareRun / prepareCall</text>
+<text x="486" y="273" font-size="15" fill="#b1c2d7" font-weight="400">输出 32 种细粒度 AgentEvent 流</text>
+<text x="486" y="297" font-size="15" fill="#b1c2d7" font-weight="400">新增 Class / JsonNode 结构化流式重载</text>
+
+<rect x="880" y="219" width="383" height="98" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1707" target="_blank">
+  <text x="898" y="247" font-size="18" fill="#72b6ff" font-weight="600">prepareRun / prepareCall</text>
 </a>
-<text x="898" y="277" font-size="16" fill="#b1c2d7" font-weight="400">返回单次 AgentRun 句柄</text>
-<text x="898" y="301" font-size="16" fill="#b1c2d7" font-weight="400">RunControl 管理运行与取消</text>
-<path d="M660 341 L660 367" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<rect x="34" y="375" width="1252" height="197" rx="15" fill="#101b2d" stroke="#2a3a51"/>
-<text x="56" y="408" font-size="21" fill="#cfe2ff" font-weight="600">02  事件流核心与 onAgent 洋葱链</text>
-<text x="56" y="434" font-size="15" fill="#99adc7" font-weight="400">ReActAgent#buildAgentStream → buildIdentifiedAgentStream：事件外壳覆盖完整生命周期。</text>
-<rect x="56" y="455" width="385" height="92" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1290" target="_blank">
-<text x="74" y="483" font-size="18" fill="#72b6ff" font-weight="600">buildAgentStream</text>
+<text x="898" y="273" font-size="15" fill="#b1c2d7" font-weight="400">返回惰性单次订阅 AgentRun 句柄</text>
+<text x="898" y="297" font-size="15" fill="#b1c2d7" font-weight="400">按本次 runId 精确取消或协作中断</text>
+
+<path d="M660 338 L660 366" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<!-- Layer 02 -->
+<rect x="34" y="374" width="1252" height="198" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="407" font-size="21" fill="#cfe2ff" font-weight="600">02  四级身份、入口模型解析与 ON_AGENT 洋葱链</text>
+<text x="56" y="433" font-size="15" fill="#99adc7" font-weight="400">ReActAgent#buildAgentStream → resolveModelAtEntry → buildIdentifiedAgentStream：所有入口只套一层 onAgent。</text>
+
+<rect x="56" y="453" width="385" height="98" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1559" target="_blank">
+  <text x="74" y="481" font-size="18" fill="#72b6ff" font-weight="600">buildAgentStream</text>
 </a>
-<text x="74" y="509" font-size="16" fill="#b1c2d7" font-weight="400">复制本次 RuntimeContext</text>
-<text x="74" y="533" font-size="16" fill="#b1c2d7" font-weight="400">绑定 ExecutionIdentity 与 RunControl</text>
-<rect x="468" y="455" width="385" height="92" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1332" target="_blank">
-<text x="486" y="483" font-size="18" fill="#72b6ff" font-weight="600">buildIdentifiedAgentStream</text>
+<text x="74" y="507" font-size="15" fill="#b1c2d7" font-weight="400">绑定 agent/session/thread/turn/run 身份</text>
+<text x="74" y="531" font-size="15" fill="#b1c2d7" font-weight="400">resolveModelAtEntry 移出事件循环解析模型</text>
+
+<rect x="468" y="453" width="385" height="98" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1630" target="_blank">
+  <text x="486" y="481" font-size="18" fill="#72b6ff" font-weight="600">buildIdentifiedAgentStream</text>
 </a>
-<text x="486" y="509" font-size="16" fill="#b1c2d7" font-weight="400">onAgent 包住 lifecycle</text>
-<text x="486" y="533" font-size="16" fill="#b1c2d7" font-weight="400">AgentStart → 运行 → Result / End</text>
-<rect x="880" y="455" width="383" height="92" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1264" target="_blank">
-<text x="898" y="483" font-size="18" fill="#72b6ff" font-weight="600">call 的取值边界</text>
+<text x="486" y="507" font-size="15" fill="#b1c2d7" font-weight="400">ON_AGENT 洋葱链包裹 runLifecycle</text>
+<text x="486" y="531" font-size="15" fill="#b1c2d7" font-weight="400">AgentStart → 运行体 → Result / End</text>
+
+<rect x="880" y="453" width="383" height="98" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1533" target="_blank">
+  <text x="898" y="481" font-size="18" fill="#72b6ff" font-weight="600">callInternal 取值边界</text>
 </a>
-<text x="898" y="509" font-size="16" fill="#b1c2d7" font-weight="400">takeLast(1).next()</text>
-<text x="898" y="533" font-size="16" fill="#b1c2d7" font-weight="400">没有结果事件时返回空 Mono</text>
-<path d="M442 499 L466 499" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<path d="M854 499 L878 499" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<path d="M660 573 L660 599" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<rect x="34" y="607" width="1252" height="374" rx="15" fill="#101b2d" stroke="#2a3a51"/>
-<text x="56" y="640" font-size="21" fill="#cfe2ff" font-weight="600">03  生命周期：准入 → 获取会话资源 → 执行</text>
-<text x="56" y="666" font-size="15" fill="#99adc7" font-weight="400">AgentBase#runLifecycle → runInContext → runLifecycleBody；同一实例内同会话串行，跨会话可并行。</text>
-<rect x="56" y="688" width="385" height="94" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java#L321" target="_blank">
-<text x="74" y="716" font-size="18" fill="#72b6ff" font-weight="600">runInContext</text>
+<text x="898" y="507" font-size="15" fill="#b1c2d7" font-weight="400">过滤 AgentResultEvent 取最后一条 Msg</text>
+<text x="898" y="531" font-size="15" fill="#b1c2d7" font-weight="400">无结果事件时返回空 Mono（同样触发保存）</text>
+
+<path d="M442 502 L466 502" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M854 502 L878 502" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M660 572 L660 600" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<!-- Layer 03 -->
+<rect x="34" y="608" width="1252" height="384" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="641" font-size="21" fill="#cfe2ff" font-weight="600">03  生命周期：按 Thread 串行准入 → 获取日志/状态 → 解析授权面</text>
+<text x="56" y="667" font-size="15" fill="#99adc7" font-weight="400">AgentBase#runLifecycle → runInContext → runLifecycleBody：同 Thread 串行排队，同 Session 兄弟 Thread 及跨会话并行。</text>
+
+<rect x="56" y="688" width="385" height="96" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java#L325" target="_blank">
+  <text x="74" y="716" font-size="18" fill="#72b6ff" font-weight="600">runInContext</text>
 </a>
-<text x="74" y="742" font-size="16" fill="#b1c2d7" font-weight="400">注册停机追踪，进入串行闸门</text>
-<text x="74" y="766" font-size="16" fill="#b1c2d7" font-weight="400">RunControl.guard 覆盖排队与执行</text>
-<rect x="468" y="688" width="385" height="94" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java#L378" target="_blank">
-<text x="486" y="716" font-size="18" fill="#72b6ff" font-weight="600">runLifecycleBody</text>
+<text x="74" y="742" font-size="15" fill="#b1c2d7" font-weight="400">注册优雅停机 requestId · serializeOnKey</text>
+<text x="74" y="766" font-size="15" fill="#b1c2d7" font-weight="400">取消时等待 cancelCleanup 门闩释放</text>
+
+<rect x="468" y="688" width="385" height="96" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java#L397" target="_blank">
+  <text x="486" y="716" font-size="18" fill="#72b6ff" font-weight="600">runLifecycleBody</text>
 </a>
-<text x="486" y="742" font-size="16" fill="#b1c2d7" font-weight="400">Mono.usingWhen 建立资源边界</text>
-<text x="486" y="766" font-size="16" fill="#b1c2d7" font-weight="400">acquire → execute → release</text>
-<rect x="880" y="688" width="383" height="94" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java#L418" target="_blank">
-<text x="898" y="716" font-size="18" fill="#72b6ff" font-weight="600">executeCallBody</text>
+<text x="486" y="742" font-size="15" fill="#b1c2d7" font-weight="400">Mono.usingWhen 建立异步资源边界</text>
+<text x="486" y="766" font-size="15" fill="#b1c2d7" font-weight="400">acquire → execute → release 三态清理</text>
+
+<rect x="880" y="688" width="383" height="96" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/agent/AgentBase.java#L450" target="_blank">
+  <text x="898" y="716" font-size="18" fill="#72b6ff" font-weight="600">executeCallBody</text>
 </a>
-<text x="898" y="742" font-size="16" fill="#b1c2d7" font-weight="400">notifyPreCall → doCall</text>
-<text x="898" y="766" font-size="16" fill="#b1c2d7" font-weight="400">→ notifyPostCall / 错误处理</text>
-<path d="M442 733 L466 733" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<path d="M854 733 L878 733" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<rect x="56" y="811" width="591" height="143" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L825" target="_blank">
-<text x="74" y="839" font-size="18" fill="#6cdbb3" font-weight="600">Native Session：acquireCallExecution</text>
+<text x="898" y="742" font-size="15" fill="#b1c2d7" font-weight="400">notifyPreCall（ON_SYSTEM_PROMPT）→ doCall</text>
+<text x="898" y="766" font-size="15" fill="#b1c2d7" font-weight="400">→ host.finish → beforeCallComplete → postCall</text>
+
+<path d="M442 736 L466 736" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M854 736 L878 736" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<rect x="56" y="814" width="591" height="154" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L951" target="_blank">
+  <text x="74" y="842" font-size="18" fill="#6cdbb3" font-weight="600">ThreadJournal：acquireCallExecution</text>
 </a>
-<text x="74" y="865" font-size="16" fill="#b1c2d7" font-weight="400">配置 SessionLogStore 且模式不是 LEGACY</text>
-<text x="74" y="889" font-size="16" fill="#b1c2d7" font-weight="400">打开日志 / SessionRecorder，恢复状态并开始回合</text>
-<text x="74" y="913" font-size="16" fill="#b1c2d7" font-weight="400">onAgentStateReady 可调整本次输入</text>
-<rect x="672" y="811" width="591" height="143" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L920" target="_blank">
-<text x="690" y="839" font-size="18" fill="#e6bd72" font-weight="600">Legacy：beforeAgentExecution</text>
+<text x="74" y="868" font-size="15" fill="#b1c2d7" font-weight="400">journalEnabled 且配置 ThreadJournalStore 时启用</text>
+<text x="74" y="892" font-size="15" fill="#b1c2d7" font-weight="400">拿 2min writer 租约 + JournalProjection 恢复状态（空 main 自动导入 2.0 存档）</text>
+<text x="74" y="916" font-size="15" fill="#b1c2d7" font-weight="400">启动期若被取消，立即关闭 InvocationRecorder 归还租约（#4072）</text>
+<text x="74" y="940" font-size="15" fill="#b1c2d7" font-weight="400">提交 run/start + input/received + state/checkpoint</text>
+
+<rect x="672" y="814" width="591" height="154" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1092" target="_blank">
+  <text x="690" y="842" font-size="18" fill="#e6bd72" font-weight="600">beforeAgentExecution &amp; CapabilitySurface</text>
 </a>
-<text x="690" y="865" font-size="16" fill="#b1c2d7" font-weight="400">未配置日志，或显式选择 LEGACY</text>
-<text x="690" y="889" font-size="16" fill="#b1c2d7" font-weight="400">StateStore 加载状态，或使用内存会话缓存</text>
-<text x="690" y="913" font-size="16" fill="#b1c2d7" font-weight="400">仍创建独立 CallExecution 与本次工具视图</text>
-<path d="M660 783 L350 809" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6 5"/>
-<path d="M660 783 L960 809" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6 5"/>
-<path d="M660 982 L660 1008" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<rect x="34" y="1016" width="1252" height="400" rx="15" fill="#101b2d" stroke="#2a3a51"/>
-<text x="56" y="1049" font-size="21" fill="#cfe2ff" font-weight="600">04  CallExecution：推理、行动与暂停</text>
-<text x="56" y="1075" font-size="15" fill="#99adc7" font-weight="400">doCallInner 先处理 pending 工具 / 确认 / 外部结果，再进入 coreAgent 或 resumeAgent。</text>
-<rect x="56" y="1097" width="591" height="119" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L2798" target="_blank">
-<text x="74" y="1125" font-size="18" fill="#6cdbb3" font-weight="600">reasoning → Model#stream</text>
+<text x="690" y="868" font-size="15" fill="#b1c2d7" font-weight="400">Standalone 模式直接从 AgentStateStore 或内存加载槽位</text>
+<text x="690" y="892" font-size="15" fill="#b1c2d7" font-weight="400">实例首次激活槽位时应用 Builder 声明的权限上下文（#3361）</text>
+<text x="690" y="916" font-size="15" fill="#b1c2d7" font-weight="400">触发 ON_AGENT_STATE_READY 同步通知（可调整本次输入副本）</text>
+<text x="690" y="940" font-size="15" fill="#b1c2d7" font-weight="400">执行 CapabilityResolver 解析服务端技能/工具组/工具授权面（#3500）</text>
+
+<path d="M660 784 L350 812" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6 5"/>
+<path d="M660 784 L960 812" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6 5"/>
+<path d="M660 992 L660 1020" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<!-- Layer 04 -->
+<rect x="34" y="1028" width="1252" height="422" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="1061" font-size="21" fill="#cfe2ff" font-weight="600">04  CallExecution：宿主边界、推理、行动与暂停出口</text>
+<text x="56" y="1087" font-size="15" fill="#99adc7" font-weight="400">doCallInner 先检查延迟模型答案（#4218）与 pending 工具 / HITL 确认 / 外部结果，再进入推理或恢复行动；全程同步通知 ON_AGENT_EVENT。</text>
+
+<rect x="56" y="1108" width="591" height="128" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L3340" target="_blank">
+  <text x="74" y="1136" font-size="18" fill="#6cdbb3" font-weight="600">reasoning → RecordedModels#stream</text>
 </a>
-<text x="74" y="1151" font-size="16" fill="#b1c2d7" font-weight="400">onReasoning → onModelCall → 最终请求准备</text>
-<text x="74" y="1175" font-size="16" fill="#b1c2d7" font-weight="400">isFinished：有文本且无工具，或服务端工具结果齐全</text>
-<text x="74" y="1199" font-size="16" fill="#b1c2d7" font-weight="400">空回复注入提醒；maxIters 触发 summarizing</text>
-<rect x="672" y="1097" width="591" height="119" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L3463" target="_blank">
-<text x="690" y="1125" font-size="18" fill="#e6bd72" font-weight="600">acting → runToolBatch</text>
+<text x="74" y="1162" font-size="15" fill="#b1c2d7" font-weight="400">REASONING 边界 → ON_REASONING → ON_MODEL_CALL（含检索）</text>
+<text x="74" y="1186" font-size="15" fill="#b1c2d7" font-weight="400">hostBoundary(MODEL) → ModelRequestPreparer（Harness 驱逐/压缩/预算）</text>
+<text x="74" y="1210" font-size="15" fill="#b1c2d7" font-weight="400">untilInterrupted（Flux#handle 同步判中断 #4088）· 空回复注入提醒</text>
+
+<rect x="672" y="1108" width="591" height="128" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L4043" target="_blank">
+  <text x="690" y="1136" font-size="18" fill="#e6bd72" font-weight="600">acting → partitionByGrant → runToolBatch</text>
 </a>
-<text x="690" y="1151" font-size="16" fill="#b1c2d7" font-weight="400">先隔离畸形参数，再判权限与派发工具</text>
-<text x="690" y="1175" font-size="16" fill="#b1c2d7" font-weight="400">ToolExecutor 校验参数并执行；发布进度 / 结果</text>
-<text x="690" y="1199" font-size="16" fill="#b1c2d7" font-weight="400">工具结果进入上下文，再回到下一轮推理</text>
-<path d="M648 1145 L670 1145" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<path d="M672 1193 L649 1193" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<rect x="56" y="1241" width="385" height="141" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L4802" target="_blank">
-<text x="74" y="1269" font-size="18" fill="#6cdbb3" font-weight="600">普通结束</text>
+<text x="690" y="1162" font-size="15" fill="#b1c2d7" font-weight="400">hostBoundary(ACTING) → 坏参数隔离（malformedArguments 禁入执行）</text>
+<text x="690" y="1186" font-size="15" fill="#b1c2d7" font-weight="400">CapabilitySurface 授权裁剪先于 PermissionEngine（防越权确认弹窗）</text>
+<text x="690" y="1210" font-size="15" fill="#b1c2d7" font-weight="400">HITL 先落盘 ASKING 再发确认事件（#3699）· ToolExecutor 分区并发执行</text>
+
+<path d="M648 1156 L670 1156" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M672 1202 L649 1202" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<rect x="56" y="1260" width="385" height="164" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L5649" target="_blank">
+  <text x="74" y="1288" font-size="18" fill="#6cdbb3" font-weight="600">普通结束与结构化输出</text>
 </a>
-<text x="74" y="1295" font-size="16" fill="#b1c2d7" font-weight="400">无待执行工具且满足结束条件</text>
-<text x="74" y="1319" font-size="16" fill="#b1c2d7" font-weight="400">服务端工具与普通工具分开判断</text>
-<text x="74" y="1343" font-size="16" fill="#b1c2d7" font-weight="400">结构化输出另有有限补试</text>
-<rect x="468" y="1241" width="385" height="141" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L2178" target="_blank">
-<text x="486" y="1269" font-size="18" fill="#e6bd72" font-weight="600">暂停与直接返回</text>
+<text x="74" y="1314" font-size="15" fill="#b1c2d7" font-weight="400">MODEL_STOP：无本地工具且有可见文本</text>
+<text x="74" y="1338" font-size="15" fill="#b1c2d7" font-weight="400">服务端工具同消息已带结果时直接完成</text>
+<text x="74" y="1362" font-size="15" fill="#b1c2d7" font-weight="400">STRUCTURED_OUTPUT：原生或合成工具降级</text>
+<text x="74" y="1386" font-size="15" fill="#b1c2d7" font-weight="400">MAX_ITERATIONS：summarizing 无工具收尾</text>
+
+<rect x="468" y="1260" width="385" height="164" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L2698" target="_blank">
+  <text x="486" y="1288" font-size="18" fill="#e6bd72" font-weight="600">暂停待续与直接返回</text>
 </a>
-<text x="486" y="1295" font-size="16" fill="#b1c2d7" font-weight="400">权限确认 / 等待外部结果</text>
-<text x="486" y="1319" font-size="16" fill="#b1c2d7" font-weight="400">全拒绝且 stopOnReject</text>
-<text x="486" y="1343" font-size="16" fill="#b1c2d7" font-weight="400">returnDirect 符合条件时短路</text>
-<rect x="880" y="1241" width="383" height="141" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L583" target="_blank">
-<text x="898" y="1269" font-size="18" fill="#f2a3a3" font-weight="600">错误与中断</text>
+<text x="486" y="1314" font-size="15" fill="#b1c2d7" font-weight="400">PERMISSION_ASKING：等待人工审批回传</text>
+<text x="486" y="1338" font-size="15" fill="#b1c2d7" font-weight="400">TOOL_SUSPENDED：外部工具挂起待结果</text>
+<text x="486" y="1362" font-size="15" fill="#b1c2d7" font-weight="400">HOST_PAUSED：AgentExecutionHost 边界挂起</text>
+<text x="486" y="1386" font-size="15" fill="#b1c2d7" font-weight="400">TOOL_RETURN_DIRECT：工具结果直达用户</text>
+
+<rect x="880" y="1260" width="383" height="164" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L710" target="_blank">
+  <text x="898" y="1288" font-size="18" fill="#f2a3a3" font-weight="600">错误、中断与取消</text>
 </a>
-<text x="898" y="1295" font-size="16" fill="#b1c2d7" font-weight="400">失败保存已确认的安全状态</text>
-<text x="898" y="1319" font-size="16" fill="#b1c2d7" font-weight="400">用户中断先补齐悬空工具结果</text>
-<text x="898" y="1343" font-size="16" fill="#b1c2d7" font-weight="400">取消交资源释放路径处理</text>
-<path d="M660 1417 L660 1443" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<rect x="34" y="1451" width="1252" height="324" rx="15" fill="#101b2d" stroke="#2a3a51"/>
-<text x="56" y="1484" font-size="21" fill="#cfe2ff" font-weight="600">05  保存状态、释放资源与最终事件</text>
-<text x="56" y="1510" font-size="15" fill="#99adc7" font-weight="400">saveStateToSession 按当前会话模式分流；保存失败与模型失败不应混为一个成功结果。</text>
-<rect x="56" y="1532" width="591" height="95" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L542" target="_blank">
-<text x="74" y="1560" font-size="18" fill="#6cdbb3" font-weight="600">Native：SessionRecorder#checkpoint</text>
+<text x="898" y="1314" font-size="15" fill="#b1c2d7" font-weight="400">失败先存已确认安全状态，原样抛原异常</text>
+<text x="898" y="1338" font-size="15" fill="#b1c2d7" font-weight="400">用户中断补齐悬空工具错误结果再保存</text>
+<text x="898" y="1362" font-size="15" fill="#b1c2d7" font-weight="400">停机中断标记 shutdownInterrupted 防重入</text>
+<text x="898" y="1386" font-size="15" fill="#b1c2d7" font-weight="400">订阅取消进入 releaseCallExecution 清理</text>
+
+<path d="M660 1450 L660 1478" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<!-- Layer 05 -->
+<rect x="34" y="1486" width="1252" height="334" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="1519" font-size="21" fill="#cfe2ff" font-weight="600">05  状态落盘、ON_AGENT_FINISH 收尾、租约释放与最终事件</text>
+<text x="56" y="1545" font-size="15" fill="#99adc7" font-weight="400">saveStateToSession 按持久模式分流；在 writer 租约释放前运行 ON_AGENT_FINISH，最后发出 AgentResultEvent / AgentEndEvent。</text>
+
+<rect x="56" y="1566" width="591" height="106" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L618" target="_blank">
+  <text x="74" y="1594" font-size="18" fill="#6cdbb3" font-weight="600">ThreadJournal：checkpoint + main 镜像</text>
 </a>
-<text x="74" y="1586" font-size="16" fill="#b1c2d7" font-weight="400">checkpoint 保存状态；回合日志保留执行事实</text>
-<text x="74" y="1610" font-size="16" fill="#b1c2d7" font-weight="400">不是用旧 AgentStateStore CAS 替代原生日志</text>
-<rect x="672" y="1532" width="591" height="95" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L548" target="_blank">
-<text x="690" y="1560" font-size="18" fill="#e6bd72" font-weight="600">Legacy：saveLegacyState</text>
+<text x="74" y="1620" font-size="15" fill="#b1c2d7" font-weight="400">InvocationRecorder#checkpoint 提交状态与 AgentExecutionPosition</text>
+<text x="74" y="1644" font-size="15" fill="#b1c2d7" font-weight="400">mirrorMainThreadState 将 main 线程同步镜像回 2.0 AgentStateStore</text>
+
+<rect x="672" y="1566" width="591" height="106" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L663" target="_blank">
+  <text x="690" y="1594" font-size="18" fill="#e6bd72" font-weight="600">Standalone：saveStoredState（CAS）</text>
 </a>
-<text x="690" y="1586" font-size="16" fill="#b1c2d7" font-weight="400">仅在配置 StateStore 时写入</text>
-<text x="690" y="1610" font-size="16" fill="#b1c2d7" font-weight="400">支持版本的后端走 CAS / ConflictPolicy</text>
-<rect x="56" y="1653" width="591" height="95" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L899" target="_blank">
-<text x="74" y="1681" font-size="18" fill="#72b6ff" font-weight="600">releaseCallExecution</text>
+<text x="690" y="1620" font-size="15" fill="#b1c2d7" font-weight="400">仅未启用 ThreadJournal 且配置了 AgentStateStore 时执行</text>
+<text x="690" y="1644" font-size="15" fill="#b1c2d7" font-weight="400">persistAgentStateCas 乐观并发校验 + beginStateWrite 在途写登记</text>
+
+<rect x="56" y="1694" width="591" height="106" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1076" target="_blank">
+  <text x="74" y="1722" font-size="18" fill="#72b6ff" font-weight="600">beforeCallComplete &amp; releaseCallExecution</text>
 </a>
-<text x="74" y="1707" font-size="16" fill="#b1c2d7" font-weight="400">usingWhen 的完成 / 错误 / 取消清理</text>
-<text x="74" y="1731" font-size="16" fill="#b1c2d7" font-weight="400">关闭 SessionExecution，finish 状态并释放 writer</text>
-<rect x="672" y="1653" width="591" height="95" rx="10" fill="#16243a" stroke="#324967"/>
-<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/dcb131a3f257f06e2b7ddcd3dacfe75d31d04028/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1332" target="_blank">
-<text x="690" y="1681" font-size="18" fill="#72b6ff" font-weight="600">最终事件与调用返回</text>
+<text x="74" y="1748" font-size="15" fill="#b1c2d7" font-weight="400">成功结果先执行 ON_AGENT_FINISH 异步中间件链（仍在活跃上下文内）</text>
+<text x="74" y="1772" font-size="15" fill="#b1c2d7" font-weight="400">recorder.finish 写 run/end 并释放 writer；取消时等待 closeStateWrites（#3924）</text>
+
+<rect x="672" y="1694" width="591" height="106" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/ReActAgent.java#L1630" target="_blank">
+  <text x="690" y="1722" font-size="18" fill="#72b6ff" font-weight="600">最终事件与调用返回</text>
 </a>
-<text x="690" y="1707" font-size="16" fill="#b1c2d7" font-weight="400">清理完成后 lifecycle 才向外发出结果</text>
-<text x="690" y="1731" font-size="16" fill="#b1c2d7" font-weight="400">有 Msg 才有 AgentResult；错误仍沿错误通道传播</text>
-<path d="M648 1700 L670 1700" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
-<text x="38" y="1810" font-size="16" fill="#99adc7" font-weight="400">源码基线  dcb131a3f257f06e2b7ddcd3dacfe75d31d04028</text>
-<text x="38" y="1836" font-size="15" fill="#99adc7" font-weight="400">对应第 2、3、4、6、7 章；源码定位与复验方法见 SOURCE_BASELINE.md。</text>
+<text x="690" y="1748" font-size="15" fill="#b1c2d7" font-weight="400">资源释放完成后向外发送 AgentResultEvent（携带终态 Msg）</text>
+<text x="690" y="1772" font-size="15" fill="#b1c2d7" font-weight="400">doFinally 发出 AgentEndEvent 并关闭流；错误沿 onError 通道传播</text>
+
+<path d="M648 1747 L670 1747" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<text x="38" y="1852" font-size="15" fill="#99adc7" font-weight="400">源码基线  80926f92df182d258118456ae458043af0d7e807</text>
+<text x="38" y="1876" font-size="14" fill="#99adc7" font-weight="400">对应本指南第 2、3、4、6、7 章；全部方法行号由 scripts/verify_docs.py 自动核验。</text>
 </svg>
