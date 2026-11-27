@@ -1,0 +1,169 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1320 1590" role="img" aria-labelledby="title desc" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+<title id="title">AgentScope Java 2.1.0-SNAPSHOT：Durable 与 ThreadJournal 持久执行架构全景</title>
+<desc id="desc">基线 main 80926f92df182d258118456ae458043af0d7e807。展示从 DurableSession / DurableTurn 公共契约，经 AgentScopeAdapter、AgentScopeExecutionHost 与 BackendThreadJournal 融合原生 ReAct/Harness 循环，到底层 SQLite/PostgreSQL SessionBackend、ModelWorker 队列化模型推理，以及基于 RocketMQ 和 Sandbox 的 Brain-Queue-Hands 远程工具解耦全链路。点击标题可跳转固定 SHA 源码声明行。</desc>
+<defs>
+  <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+    <path d="M0 0L8 4L0 8Z" fill="#7389a5"/>
+  </marker>
+</defs>
+<rect width="1320" height="1590" rx="18" fill="#0b1220"/>
+
+<text x="38" y="50" font-size="30" fill="#f1f6ff" font-weight="700">AgentScope Durable &amp; ThreadJournal</text>
+<text x="38" y="84" font-size="19" fill="#99adc7" font-weight="400">跨断连、跨重启、多副本接管与 Brain–Queue–Hands 工具解耦 · 四层持久执行架构图</text>
+<text x="890" y="46" font-size="17" fill="#72b6ff" font-weight="600">AgentScope Java 2.1.0-SNAPSHOT</text>
+<text x="890" y="73" font-size="15" fill="#99adc7" font-weight="400">main 80926f92 · 2026-11-27 核对</text>
+<text x="38" y="118" font-size="15" fill="#99adc7" font-weight="400">实线表示控制与事务提交路径；虚线表示可选队列化模型或独立进程 Hands Worker 拓扑。标题均可点击查看源码。</text>
+
+<!-- Layer 01: Public Control & Runtime -->
+<rect x="34" y="140" width="1252" height="292" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="173" font-size="21" fill="#cfe2ff" font-weight="600">01  五级持久身份与公共控制平面（Application / API Plane）</text>
+<text x="56" y="199" font-size="15" fill="#99adc7" font-weight="400">身份层次：Session → Thread（默认 main，各自独立 Turn 队列）→ Turn（持久逻辑任务）→ Run（单次底层执行尝试）→ Step。</text>
+
+<rect x="56" y="220" width="385" height="190" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/durable-runtime/src/main/java/io/agentscope/durable/DurableSession.java#L37" target="_blank">
+  <text x="74" y="248" font-size="18" fill="#72b6ff" font-weight="600">DurableSession &amp; Thread</text>
+</a>
+<text x="74" y="276" font-size="15" fill="#b1c2d7" font-weight="400">SessionKey(namespace, id) 稳定业务标识</text>
+<text x="74" y="302" font-size="15" fill="#b1c2d7" font-weight="400">同 Thread 内 Turn 按准入顺序排队执行</text>
+<text x="74" y="328" font-size="15" fill="#b1c2d7" font-weight="400">createThread 支持多分支上下文并发推进</text>
+<text x="74" y="354" font-size="15" fill="#b1c2d7" font-weight="400">observe(cursor) 先发一致快照再推增量事件</text>
+<text x="74" y="380" font-size="15" fill="#6cdbb3" font-weight="400">关闭观察流（SSE 断开）绝不取消后台任务</text>
+
+<rect x="468" y="220" width="385" height="190" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/durable-runtime/src/main/java/io/agentscope/durable/DurableTurn.java#L44" target="_blank">
+  <text x="486" y="248" font-size="18" fill="#72b6ff" font-weight="600">DurableTurn 控制契约</text>
+</a>
+<text x="486" y="276" font-size="15" fill="#b1c2d7" font-weight="400">submit(requestId, input)：请求幂等准入去重</text>
+<text x="486" y="302" font-size="15" fill="#b1c2d7" font-weight="400">steer(requestId, msg)：推理边界动态注入约束</text>
+<text x="486" y="328" font-size="15" fill="#b1c2d7" font-weight="400">pause / resume：在安全边界显式挂起与恢复</text>
+<text x="486" y="354" font-size="15" fill="#b1c2d7" font-weight="400">respond(requestId, interactionId, ...)：离线审批</text>
+<text x="486" y="380" font-size="15" fill="#e6bd72" font-weight="400">cancel(requestId)：协调确认在途外部操作取消</text>
+
+<rect x="880" y="220" width="383" height="190" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/durable-runtime/src/main/java/io/agentscope/durable/DurableRuntime.java#L75" target="_blank">
+  <text x="898" y="248" font-size="18" fill="#6cdbb3" font-weight="600">DurableRuntime 租约调度</text>
+</a>
+<text x="898" y="276" font-size="15" fill="#b1c2d7" font-weight="400">可嵌入单进程，也可拆分为无模型 API 网关</text>
+<text x="898" y="302" font-size="15" fill="#b1c2d7" font-weight="400">轮询 + Wakeups 唤醒扫描就绪或租约过期 Turn</text>
+<text x="898" y="328" font-size="15" fill="#b1c2d7" font-weight="400">获取带 Fencing 代数的排他租约并后台续租</text>
+<text x="898" y="354" font-size="15" fill="#b1c2d7" font-weight="400">节点宕机后由兼容副本发起新 Run 无感续跑</text>
+<text x="898" y="380" font-size="15" fill="#b1c2d7" font-weight="400">durable-http 暴露标准 HTTP 操作与 SSE 续传</text>
+
+<path d="M442 315 L466 315" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M854 315 L878 315" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M660 432 L660 462" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<!-- Layer 02: Native Adapter & Brain -->
+<rect x="34" y="470" width="1252" height="352" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="503" font-size="21" fill="#cfe2ff" font-weight="600">02  Brain 原生桥接层：将 ReActAgent / HarnessAgent 纳入受保护事务</text>
+<text x="56" y="529" font-size="15" fill="#99adc7" font-weight="400">durable-adapter-harness-agentscope 不改写 Core 循环，通过 AgentExecutionHost 与 ThreadJournal 两道窄契约无缝嵌入。</text>
+
+<rect x="56" y="550" width="385" height="162" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/durable-adapters/durable-adapter-harness-agentscope/src/main/java/io/agentscope/durable/agentscope/AgentScopeAdapter.java#L178" target="_blank">
+  <text x="74" y="578" font-size="18" fill="#6cdbb3" font-weight="600">AgentScopeAdapter#forHarness</text>
+</a>
+<text x="74" y="606" font-size="15" fill="#b1c2d7" font-weight="400">同时提供 forReAct 与 forHarness 工厂入口</text>
+<text x="74" y="632" font-size="15" fill="#b1c2d7" font-weight="400">每次 Run 按 Binding 构建全新 Agent 实例</text>
+<text x="74" y="658" font-size="15" fill="#b1c2d7" font-weight="400">远程 Hands 工具自动注册为 SchemaOnlyTool</text>
+<text x="74" y="684" font-size="15" fill="#b1c2d7" font-weight="400">原生 CapabilitySurface 与权限门依然先行把关</text>
+
+<rect x="468" y="550" width="385" height="162" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/durable-adapters/durable-adapter-harness-agentscope/src/main/java/io/agentscope/durable/agentscope/AgentScopeExecutionHost.java#L67" target="_blank">
+  <text x="486" y="578" font-size="18" fill="#e6bd72" font-weight="600">AgentScopeExecutionHost</text>
+</a>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/agent/AgentExecutionHost.java#L29" target="_blank">
+  <text x="486" y="604" font-size="14" fill="#72b6ff" font-weight="500">实现 AgentExecutionHost 与 ModelInvocation</text>
+</a>
+<text x="486" y="632" font-size="15" fill="#b1c2d7" font-weight="400">守住推理 / 模型 / 行动 / 收尾四道恢复边界</text>
+<text x="486" y="658" font-size="15" fill="#b1c2d7" font-weight="400">在 REASONING 边界原子消费 steer / inject 信号</text>
+<text x="486" y="684" font-size="15" fill="#b1c2d7" font-weight="400">暂停或等待时抛 Paused（HOST_PAUSED）</text>
+
+<rect x="880" y="550" width="383" height="162" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/durable-adapters/durable-adapter-harness-agentscope/src/main/java/io/agentscope/durable/agentscope/BackendThreadJournal.java#L62" target="_blank">
+  <text x="898" y="578" font-size="18" fill="#72b6ff" font-weight="600">BackendThreadJournal</text>
+</a>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-core/src/main/java/io/agentscope/core/journal/InvocationRecorder.java#L63" target="_blank">
+  <text x="898" y="604" font-size="14" fill="#6cdbb3" font-weight="500">承接 core InvocationRecorder 的每次 flush 提交</text>
+</a>
+<text x="898" y="632" font-size="15" fill="#b1c2d7" font-weight="400">无第二套独立调度器，直接桥接宿主事务</text>
+<text x="898" y="658" font-size="15" fill="#b1c2d7" font-weight="400">原生 AgentState Checkpoint、外部工具意图</text>
+<text x="898" y="684" font-size="15" fill="#b1c2d7" font-weight="400">与公开 PublicEvent 在同一次 Fenced Commit 落库</text>
+
+<path d="M442 631 L466 631" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M854 631 L878 631" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<rect x="56" y="730" width="1207" height="72" rx="10" fill="#132238" stroke="#3b587c"/>
+<text x="76" y="760" font-size="16" fill="#f1f6ff" font-weight="600">核心防重语义：工具执行完成（Completed） → 结果已接收落库（Accepted） → 结果已写回原生上下文（Applied）</text>
+<text x="76" y="786" font-size="15" fill="#99adc7" font-weight="400">若宿主在 Accepted 与 Applied 之间崩溃重启，接管的新 Brain 直接读取已保存结果并提交 Applied，绝不二次重跑已产生副作用的外部工具。</text>
+
+<path d="M350 822 L350 854" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M968 822 L968 854" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6 5"/>
+
+<!-- Layer 03: Backend & Queued Model -->
+<rect x="34" y="862" width="1252" height="296" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="895" font-size="21" fill="#cfe2ff" font-weight="600">03  事务型持久后端与可选队列化模型推理（Storage &amp; Model Worker Plane）</text>
+<text x="56" y="921" font-size="15" fill="#99adc7" font-weight="400">单机开发零外部依赖即可持久化；生产多主机共享关系库与对象存储，并可将耗时的大模型流式调用剥离到独立 Worker 池。</text>
+
+<rect x="56" y="942" width="591" height="194" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-extensions/agentscope-extensions-durable-jdbc/src/main/java/io/agentscope/extensions/durable/jdbc/PostgresBackend.java#L32" target="_blank">
+  <text x="74" y="970" font-size="18" fill="#6cdbb3" font-weight="600">durable-jdbc：LocalBackend / PostgresBackend</text>
+</a>
+<text x="74" y="998" font-size="15" fill="#b1c2d7" font-weight="400">LocalBackend.open(path)：单机嵌入式 SQLite，开箱即用</text>
+<text x="74" y="1024" font-size="15" fill="#b1c2d7" font-weight="400">PostgresBackend：多副本共享事务表 + Fencing 拒绝过期旧主写入</text>
+<text x="74" y="1050" font-size="15" fill="#b1c2d7" font-weight="400">可选挂载 RocketMqWakeups 降低唤醒延迟（轮询兜底防丢通知）</text>
+<text x="74" y="1076" font-size="15" fill="#b1c2d7" font-weight="400">可选挂载 durable-objects（S3 / MinIO / OSS）外置大体积载荷</text>
+<text x="74" y="1102" font-size="15" fill="#99adc7" font-weight="400">脱离 Durable 单独用 Harness 时，则走 WorkspaceThreadJournalStore</text>
+
+<rect x="672" y="942" width="591" height="194" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/durable-adapters/durable-adapter-harness-agentscope/src/main/java/io/agentscope/durable/agentscope/ModelWorker.java#L42" target="_blank">
+  <text x="690" y="970" font-size="18" fill="#e6bd72" font-weight="600">ModelWorker &amp; QueuedModelRequest（#4218）</text>
+</a>
+<text x="690" y="998" font-size="15" fill="#b1c2d7" font-weight="400">withQueuedModel / withModelExecutions 将 LLM 推理外置</text>
+<text x="690" y="1024" font-size="15" fill="#b1c2d7" font-weight="400">Brain 在 MODEL 边界持久化编译后请求并挂起释放线程</text>
+<text x="690" y="1050" font-size="15" fill="#b1c2d7" font-weight="400">ModelWorker 按租约认领执行流式生成，分批持久化响应帧</text>
+<text x="690" y="1076" font-size="15" fill="#b1c2d7" font-weight="400">Checkpoint 记录 pendingModelCallId 与 modelAnswerId</text>
+<text x="690" y="1102" font-size="15" fill="#6cdbb3" font-weight="400">跨 Brain 重启或 Worker 换主均可续接流式帧，不丢已完成回答</text>
+
+<path d="M660 1158 L660 1190" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="6 5"/>
+
+<!-- Layer 04: Brain-Queue-Hands -->
+<rect x="34" y="1198" width="1252" height="304" rx="15" fill="#101b2d" stroke="#2a3a51"/>
+<text x="56" y="1231" font-size="21" fill="#cfe2ff" font-weight="600">04  Brain–Queue–Hands：长耗时工具与沙箱跨进程解耦（Worker Plane）</text>
+<text x="56" y="1257" font-size="15" fill="#99adc7" font-weight="400">短平快工具仍可在 Brain 进程内直接跑；20 分钟测试、重依赖环境或独立权限边界的工具按路由派发给独立 Hands Worker。</text>
+
+<rect x="56" y="1278" width="385" height="200" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-extensions/agentscope-extensions-durable-rocketmq/src/main/java/io/agentscope/extensions/durable/rocketmq/RocketMqRemoteExecutor.java#L40" target="_blank">
+  <text x="74" y="1306" font-size="18" fill="#72b6ff" font-weight="600">RocketMqRemoteExecutor</text>
+</a>
+<text x="74" y="1334" font-size="15" fill="#b1c2d7" font-weight="400">Brain 侧托管执行器（内嵌 QueuedExecutor）</text>
+<text x="74" y="1360" font-size="15" fill="#b1c2d7" font-weight="400">本地持久发件箱保证至少一次可靠投递命令</text>
+<text x="74" y="1386" font-size="15" fill="#b1c2d7" font-weight="400">携带稳定逻辑执行 ID 发往 commands/controls</text>
+<text x="74" y="1412" font-size="15" fill="#b1c2d7" font-weight="400">消费 updates Topic 将进度与结果写回 Backend</text>
+<text x="74" y="1438" font-size="15" fill="#99adc7" font-weight="400">同进程可直连 WorkerRuntime#localExecutor</text>
+
+<rect x="468" y="1278" width="385" height="200" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/durable-worker/src/main/java/io/agentscope/durable/worker/WorkerRuntime.java#L52" target="_blank">
+  <text x="486" y="1306" font-size="18" fill="#6cdbb3" font-weight="600">WorkerRuntime &amp; RocketMqWorker</text>
+</a>
+<text x="486" y="1334" font-size="15" fill="#b1c2d7" font-weight="400">Hands 侧独立执行与恢复管理器（独立生命周期）</text>
+<text x="486" y="1360" font-size="15" fill="#b1c2d7" font-weight="400">自带 ExecutionStore 账本记录执行与回传水位</text>
+<text x="486" y="1386" font-size="15" fill="#b1c2d7" font-weight="400">分离 startCapacity 与 recoveryCapacity 线程池</text>
+<text x="486" y="1412" font-size="15" fill="#b1c2d7" font-weight="400">Worker 重启后先查询原外部操作状态再决定续接</text>
+<text x="486" y="1438" font-size="15" fill="#f2a3a3" font-weight="400">无法确认结果的非幂等调用保留 UNKNOWN 待核实</text>
+
+<rect x="880" y="1278" width="383" height="200" rx="10" fill="#16243a" stroke="#324967"/>
+<a xlink:href="https://github.com/agentscope-ai/agentscope-java/blob/80926f92df182d258118456ae458043af0d7e807/agentscope-durable/README.md#L385" target="_blank">
+  <text x="898" y="1306" font-size="18" fill="#e6bd72" font-weight="600">durable-sandbox / durable-mcp</text>
+</a>
+<text x="898" y="1334" font-size="15" fill="#b1c2d7" font-weight="400">SandboxBindings：在远程沙箱启动 detached 命令</text>
+<text x="898" y="1360" font-size="15" fill="#b1c2d7" font-weight="400">Brain 退出期间沙箱内任务继续独立运行</text>
+<text x="898" y="1386" font-size="15" fill="#b1c2d7" font-weight="400">恢复时按原操作句柄分页拉取输出并回收资源</text>
+<text x="898" y="1412" font-size="15" fill="#b1c2d7" font-weight="400">durable-mcp：为远程 MCP 工具提供显式恢复扩展</text>
+<text x="898" y="1438" font-size="15" fill="#99adc7" font-weight="400">见 agentscope-examples/durable 可运行双进程示例</text>
+
+<path d="M442 1378 L466 1378" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M854 1378 L878 1378" stroke="#7389a5" fill="none" stroke-width="2" marker-end="url(#arrow)"/>
+
+<text x="38" y="1542" font-size="15" fill="#99adc7" font-weight="400">源码基线  80926f92df182d258118456ae458043af0d7e807</text>
+<text x="38" y="1566" font-size="14" fill="#99adc7" font-weight="400">对应本指南第 1、2、3、7、8 章；全部源码链接由 scripts/verify_docs.py 自动核验。</text>
+</svg>
